@@ -24,4 +24,4 @@ jobs:
           flags=()
           case "$GITHUB_REF_NAME" in *-*) flags+=(--prerelease) ;; esac
           gh release create "$GITHUB_REF_NAME" dist/* --title "AI Helper (for Claude) $GITHUB_REF_NAME" \
-            --generate-notes --verify-tag "${flags[@]}"
+            --notes-file .github/release-notes.md --generate-notes --verify-tag "${flags[@]}"

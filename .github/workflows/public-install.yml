@@ -1,0 +1,161 @@
+name: Public install (README one-liners)
+
+# End-to-end test of what a new user does: runs the exact one-line commands from README.md against the PUBLIC
+# repository (raw.githubusercontent.com + the latest release tarball), in a sandbox: temp HOME / profile, fake
+# Factorio user dir, fake `claude` CLI, no uv on PATH. Nothing comes from the checkout except the test helpers.
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "AIHELPER_REF to install (empty = latest release, like a real user)"
+        required: false
+        default: ""
+  schedule:
+    - cron: "41 5 * * 1"
+
+permissions:
+  contents: read
+
+jobs:
+  mac-linux:
+    name: README one-liner (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: helpers
+      - name: sandbox (temp HOME, fake Factorio user dir, fake claude CLI, no uv on PATH)
+        run: |
+          SB="$RUNNER_TEMP/sb"
+          mkdir -p "$SB/home" "$SB/factorio-user/mods" "$SB/bin" "$SB/apps" "$SB/game"
+          echo '{"mods":[{"name":"base","enabled":true}]}' > "$SB/factorio-user/mods/mod-list.json"
+          printf '#!/bin/sh\nexec python3 "%s/helpers/tests/fake_claude.py" "$@"\n' "$GITHUB_WORKSPACE" > "$SB/bin/claude"
+          chmod +x "$SB/bin/claude"
+          printf '#!/bin/sh\nexit 0\n' > "$SB/game/factorio"
+          chmod +x "$SB/game/factorio"
+          if [ "$RUNNER_OS" = macOS ]; then
+            APP="$SB/home/Library/Application Support/ai-helper-for-claude"
+          else
+            APP="$SB/home/.local/share/ai-helper-for-claude"
+          fi
+          # a PATH without any uv, like a fresh machine
+          NOUV=""
+          IFS=: read -ra parts <<<"$PATH"
+          for d in "${parts[@]}"; do
+            [ -n "$d" ] && [ ! -e "$d/uv" ] && NOUV="${NOUV:+$NOUV:}$d"
+          done
+          {
+            echo "SB=$SB"
+            echo "APP=$APP"
+            echo "HOME=$SB/home"
+            echo "XDG_DATA_HOME="
+            echo "NOUV_PATH=$NOUV"
+            echo "FACTORIO_USER_DIR=$SB/factorio-user"
+            echo "AIHELPER_APPS_DIR=$SB/apps"
+            echo "AIHELPER_SKIP_RUNNING_CHECK=1"
+            echo "AIHELPER_REF=${{ inputs.ref }}"
+            echo "CLAUDE_BIN=$SB/bin/claude"
+            echo "FAKE_CLAUDE_STATE=$SB/fake_claude_state.json"
+            echo "FACTORIO_BIN=$SB/game/factorio"
+            echo "FACTORIO_COMPANION_LOCK_PORT=34599"
+          } >> "$GITHUB_ENV"
+      - name: run the README one-liner exactly
+        run: |
+          [ -n "$AIHELPER_REF" ] || unset AIHELPER_REF
+          line="$(grep -m1 '^curl -fsSL https://raw' helpers/README.md)"
+          expected='curl -fsSL https://raw.githubusercontent.com/codysoutherland-creator/ai-helper-for-claude/main/install.sh | bash'
+          [ "$line" = "$expected" ] || { echo "README one-liner changed: $line"; exit 1; }
+          echo "+ $line"
+          cd "$HOME"
+          PATH="$NOUV_PATH" bash -c "$line" 2>&1 | tee "$SB/install.log"
+          grep -q '^Downloading https://codeload.github.com/codysoutherland-creator/ai-helper-for-claude/' "$SB/install.log"
+          test -x "$HOME/.local/bin/uv"
+      - name: check the result
+        run: |
+          "$APP/.venv/bin/python" helpers/tests/installer_smoke.py --app "$APP" --user-dir "$FACTORIO_USER_DIR" \
+            --claude-dir "$HOME/.claude" --fake-state "$FAKE_CLAUDE_STATE" --apps-dir "$AIHELPER_APPS_DIR"
+          "$APP/.venv/bin/python" "$APP/install.py" --check
+          grep '"version"' "$APP/mod/claude-bridge/info.json"
+      - name: launcher dry run
+        run: |
+          out="$("$APP/.venv/bin/python" "$APP/launcher.py" --dry-run)"
+          echo "$out"
+          echo "$out" | grep -q "would start: $FACTORIO_BIN --enable-lua-udp 34500"
+      - name: run the one-liner again (= update)
+        run: |
+          [ -n "$AIHELPER_REF" ] || unset AIHELPER_REF
+          cd "$HOME"
+          PATH="$NOUV_PATH" bash -c "$(grep -m1 '^curl -fsSL https://raw' "$GITHUB_WORKSPACE/helpers/README.md")"
+          "$APP/.venv/bin/python" "$APP/install.py" --check
+
+  windows:
+    name: README one-liner (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          path: helpers
+      - name: sandbox (temp profile, fake Factorio user dir, fake claude CLI, no uv on PATH)
+        run: |
+          $sb = Join-Path $env:RUNNER_TEMP 'sb'
+          New-Item -ItemType Directory -Force "$sb\home\AppData\Roaming", "$sb\home\AppData\Local", "$sb\factorio-user\mods", "$sb\bin", "$sb\desktop", "$sb\game" | Out-Null
+          Set-Content -Path "$sb\game\factorio.exe" -Value ""
+          '{"mods":[{"name":"base","enabled":true}]}' | Out-File -Encoding ascii "$sb\factorio-user\mods\mod-list.json"
+          "@echo off`r`npython `"$env:GITHUB_WORKSPACE\helpers\tests\fake_claude.py`" %*" | Out-File -Encoding ascii "$sb\bin\claude.cmd"
+          $nouv = ($env:PATH -split ';' | Where-Object { $_ -and -not (Test-Path (Join-Path $_ 'uv.exe')) }) -join ';'
+          @(
+            "SB=$sb", "USERPROFILE=$sb\home", "HOME=$sb\home",
+            "APPDATA=$sb\home\AppData\Roaming", "LOCALAPPDATA=$sb\home\AppData\Local",
+            "APP=$sb\home\AppData\Local\ai-helper-for-claude", "NOUV_PATH=$nouv",
+            "FACTORIO_USER_DIR=$sb\factorio-user", "AIHELPER_DESKTOP_DIR=$sb\desktop",
+            "AIHELPER_SKIP_RUNNING_CHECK=1", "AIHELPER_REF=${{ inputs.ref }}",
+            "CLAUDE_BIN=$sb\bin\claude.cmd", "FAKE_CLAUDE_STATE=$sb\fake_claude_state.json",
+            "FACTORIO_COMPANION_LOCK_PORT=34599", "FACTORIO_BIN=$sb\game\factorio.exe"
+          ) | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+      - name: run the README one-liner exactly
+        run: |
+          if (-not $env:AIHELPER_REF) { Remove-Item Env:AIHELPER_REF -ErrorAction SilentlyContinue }
+          $line = (Select-String -Path helpers\README.md -Pattern '^irm https://raw' | Select-Object -First 1).Line
+          $expected = 'irm https://raw.githubusercontent.com/codysoutherland-creator/ai-helper-for-claude/main/install.ps1 | iex'
+          if ($line -ne $expected) { "README one-liner changed: $line"; exit 1 }
+          "+ $line"
+          $env:PATH = $env:NOUV_PATH
+          Set-Location $env:USERPROFILE
+          Start-Transcript -Path "$env:SB\install.log" | Out-Null
+          Invoke-Expression $line
+          Stop-Transcript | Out-Null
+          if ($script:AIHelperExit) { "installer reported failure"; exit 1 }
+          if (-not (Select-String -Path "$env:SB\install.log" -Pattern 'Downloading https://codeload.github.com/codysoutherland-creator/ai-helper-for-claude/' -Quiet)) { "did not download from GitHub"; exit 1 }
+          if (-not (Test-Path "$env:USERPROFILE\.local\bin\uv.exe")) { "uv not installed to the profile"; exit 1 }
+      - name: check the result
+        run: |
+          & "$env:APP\.venv\Scripts\python.exe" helpers\tests\installer_smoke.py --app $env:APP --user-dir $env:FACTORIO_USER_DIR --claude-dir "$env:USERPROFILE\.claude" --fake-state $env:FAKE_CLAUDE_STATE --apps-dir $env:AIHELPER_DESKTOP_DIR
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$env:APP\.venv\Scripts\python.exe" "$env:APP\install.py" --check
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Select-String -Path "$env:APP\mod\claude-bridge\info.json" -Pattern '"version"'
+      - name: launcher dry run
+        run: |
+          $out = & "$env:APP\.venv\Scripts\python.exe" "$env:APP\launcher.pyw" --dry-run
+          $out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not ($out -match [regex]::Escape("would start: $env:FACTORIO_BIN --enable-lua-udp 34500"))) { exit 1 }
+      - name: run the one-liner again (= update)
+        run: |
+          if (-not $env:AIHELPER_REF) { Remove-Item Env:AIHELPER_REF -ErrorAction SilentlyContinue }
+          $env:PATH = $env:NOUV_PATH
+          Set-Location $env:USERPROFILE
+          Invoke-Expression (Select-String -Path "$env:GITHUB_WORKSPACE\helpers\README.md" -Pattern '^irm https://raw' | Select-Object -First 1).Line
+          if ($script:AIHelperExit) { exit 1 }
+          & "$env:APP\.venv\Scripts\python.exe" "$env:APP\install.py" --check
+          exit $LASTEXITCODE
