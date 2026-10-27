@@ -67,7 +67,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File testenv\restart.ps1 -Name my
 powershell -NoProfile -ExecutionPolicy Bypass -File testenv\restart.ps1 -Name mytest -Slot 21 -Stop
 ```
 
-- Slot N gives RCON `127.0.0.1:27016+N` (password `testpw`), UDP `34500+N` and game port `34199+N`. Use slot 1 or
+- Slot N gives RCON `127.0.0.1:27016+N` (password `testpw`), UDP `34500+N` and game port `127.0.0.1:34199+N` (loopback only). Use slot 1 or
   higher when you also play: the real game uses UDP 34500 and RCON 27015.
 - The Factorio binary comes from `FACTORIO_EXE` (or `FACTORIO_BIN`), else the Steam / standalone discovery in
   `factorio_claude/platforms.py`.

@@ -159,7 +159,7 @@ companion.py — hidden background process:
 launcher.pyw — one-click: if Factorio isn't running, start it via
   `steam.exe -applaunch 427520 --enable-lua-udp 34500 --rcon-port 27015 --rcon-password <pw>`; start companion
   detached with pythonw (CREATE_NO_WINDOW | DETACHED_PROCESS) unless already running; exit.
-install.py — idempotent setup (what I did by hand): venv deps present, junction mod into %APPDATA%\Factorio\mods,
+install.py — idempotent setup (automates the manual setup steps): venv deps present, junction mod into %APPDATA%\Factorio\mods,
   enable in mod-list.json (backup once), register MCP server user-scope (`claude mcp add ...` only if missing),
   desktop shortcut "Factorio (Claude)" → `.venv\Scripts\pythonw.exe launcher.pyw` (icon factorio.exe), delete the
   old "Claude Factorio Chat" shortcut. Print a short summary.

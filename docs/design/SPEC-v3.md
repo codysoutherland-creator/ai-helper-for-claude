@@ -2,18 +2,18 @@
 
 > Historical design brief (goals and milestones for v0.3). See README.md for what is implemented.
 
-## What the player wants (2026-10-26)
+## Goals
 - Spawn into a **new game**, ask Claude "set me up with a starter base", and get a complete, verified, working
   starter base: mines → smelting hub → bus, power, coal/fuel logistics. Repeatable at every stage of growth.
 - Early: simple tasks (already mostly free buttons). Later: **completely re-optimize or analyze the base in any facet**,
   including **other planets**, with **multiple Claude helpers on different planets** at the same time.
 - "Optimized" = **ask each time**: the planner produces 2-3 variants with clear trade-offs; the player picks in-game.
 - Cost: **show an estimate and wait for confirmation** before expensive Claude jobs.
-- Today's 749 unverified Claude ghosts: **remove them all** (keep the player's own ghosts).
+- Unverified ghosts left by earlier Claude sessions: **removable in one step** (keep the player's own ghosts).
 
-## Lesson from the first real session
-Claude hand-placed 749 ghosts across 4 replies, ~$1.20 API-equivalent, nothing verified, missed a lake next to the
-player, furnaces without fuel feed, belts crossing the bus. An LLM placing entities one by one is the wrong tool.
+## Lesson from early testing
+An early session had Claude hand-place ~750 unverified ghosts: layouts ignored nearby water, furnaces had no fuel
+feed, belts crossed the bus. An LLM placing entities one by one is the wrong tool.
 **Principle: deterministic code does perception, math, layout, routing and verification (free, exact); Claude does
 intent, choosing between variants, explaining trade-offs, and orchestration (few cheap calls).**
 

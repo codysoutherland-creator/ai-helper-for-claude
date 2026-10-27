@@ -6,7 +6,7 @@
 # -Stop just stops that instance. State resets on every restart (fresh copy of the save).
 # -Save <file> starts from another save in testenv\write (default test.zip), e.g. -Save seed_123.zip.
 # Test instances get the mod's startup setting claude-debug-ops=true (test ops: chat_simulate, gui_click, ...) via a
-# generated mod-settings.dat; -NoDebugOps starts one like a player's game. RCON is bound to 127.0.0.1 only.
+# generated mod-settings.dat; -NoDebugOps starts one like a player's game. RCON and the game port are bound to 127.0.0.1 only.
 param([string]$Name = "default", [int]$Slot = 0, [switch]$Stop, [string]$Save = "test.zip", [switch]$NoDebugOps)
 $root = Split-Path -Parent $PSScriptRoot
 $rootFwd = $root -replace '\\', '/'
@@ -38,7 +38,7 @@ $exe = & "$root\.venv\Scripts\python.exe" -c "import sys; sys.path.insert(0, sys
 if (-not $exe) { "factorio.exe not found: set FACTORIO_EXE"; exit 1 }
 $argList = @("--config", "$instFwd/config.ini", "--mod-directory", "$instFwd/mods",
   "--start-server", "$instFwd/write/$Save",
-  "--rcon-bind", "127.0.0.1:$rcon", "--rcon-password", "testpw", "--port", "$gport", "--enable-lua-udp", "$udp",
+  "--rcon-bind", "127.0.0.1:$rcon", "--rcon-password", "testpw", "--bind", "127.0.0.1:$gport", "--enable-lua-udp", "$udp",
   "--server-settings", "$rootFwd/testenv/server-settings.json")
 Remove-Item "$inst\server.log" -ErrorAction SilentlyContinue
 Start-Process -FilePath $exe -ArgumentList $argList -RedirectStandardOutput "$inst\server.log" -WindowStyle Hidden
