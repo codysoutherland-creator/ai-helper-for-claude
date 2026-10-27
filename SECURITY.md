@@ -28,7 +28,10 @@ anything that needs the attacker to already control your user account.
 
 - Everything listens on `127.0.0.1` only. RCON is off by default for new installs and bound to localhost when on.
 - In-game Claude runs with a fixed tool allowlist, a per-call budget cap and no raw Lua, cheats or clipboard.
-- `config.json`, `chat-session/` and `mcp.json` are created readable only by you.
+- `config.json`, `chat-session/`, `mcp.json` and `logs/` are created readable only by you (on macOS/Linux).
+- If you turn RCON on (`"rcon": true`), the launcher has to pass the RCON password to Factorio on its command line
+  (`--rcon-password`; Factorio has no other way to receive it). Other local users can see process command lines on
+  macOS/Linux, so on a shared machine leave RCON off. The launcher never prints the password.
 - Python dependencies are installed from a hash-locked `requirements.lock`.
 
 Unofficial project; not affiliated with or endorsed by Anthropic.

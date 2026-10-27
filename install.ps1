@@ -25,6 +25,8 @@ function Install-AIHelper {
 
     $repo = 'codysoutherland-creator/ai-helper-for-claude'
     $uvVersion = '0.12.24'
+    # SHA-256 of https://astral.sh/uv/$uvVersion/install.ps1 (update together with $uvVersion)
+    $uvInstallerSha256 = '05cfb8cca7fb43455b3efe78c9fab72189a97491e9fada5a3fa621f1afb9b3f4'
     $pyVersion = if ($env:AIHELPER_PYTHON) { $env:AIHELPER_PYTHON } else { '3.14' }
     # never part of an update: the user's own files in the install folder
     $keep = @('config.json', '.venv', 'logs', 'chat-session', 'plans', 'blueprints', 'foreman-notes.md')
@@ -138,9 +140,18 @@ function Install-AIHelper {
         $env:UV_NO_MODIFY_PATH = '1'
         # a child PowerShell: the uv installer must not be able to end this session
         $ps = (Get-Process -Id $PID).Path
-        & $ps -NoProfile -ExecutionPolicy Bypass -Command "irm https://astral.sh/uv/$uvVersion/install.ps1 | iex" |
-            Out-Null
-        Remove-Item Env:UV_UNMANAGED_INSTALL, Env:UV_NO_MODIFY_PATH -ErrorAction SilentlyContinue
+        $script = Join-Path ([IO.Path]::GetTempPath()) ("aihelper-uv-" + [guid]::NewGuid().ToString('N') + '.ps1')
+        try {
+            Invoke-WebRequest -UseBasicParsing -Uri "https://astral.sh/uv/$uvVersion/install.ps1" -OutFile $script
+            $sum = (Get-FileHash -LiteralPath $script -Algorithm SHA256).Hash.ToLowerInvariant()
+            if ($sum -ne $uvInstallerSha256) {
+                throw "the uv $uvVersion installer didn't match its pinned SHA-256; not running it"
+            }
+            & $ps -NoProfile -ExecutionPolicy Bypass -File $script | Out-Null
+        } finally {
+            Remove-Item -LiteralPath $script -Force -ErrorAction SilentlyContinue
+            Remove-Item Env:UV_UNMANAGED_INSTALL, Env:UV_NO_MODIFY_PATH -ErrorAction SilentlyContinue
+        }
         $uv = Join-Path $bin 'uv.exe'
         if (-not (Test-Path -LiteralPath $uv)) { throw "couldn't install uv" }
         return $uv

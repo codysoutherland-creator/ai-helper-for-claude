@@ -31,8 +31,9 @@ IDOK = platforms.IDOK
 
 
 def out(msg):
-    LOG.parent.mkdir(exist_ok=True)
-    with LOG.open("a", encoding="utf-8") as f:
+    companion.private_log_dir(LOG.parent)
+    fd = os.open(LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    with open(fd, "a", encoding="utf-8") as f:
         f.write(time.strftime("%Y-%m-%d %H:%M:%S ") + msg + "\n")
     if sys.stdout is not None:
         try:

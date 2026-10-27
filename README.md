@@ -132,6 +132,8 @@ fails is dropped and the next candidate is tried. Plans are saved in `plans/` an
 `cost_gate`, `planning_estimate`, optional `chat_effort`; `host`/`port`/`password` = RCON, used only for
 `factorio_run_lua` from Claude Code. RCON is opt-in: `"rcon": true` (new installs get `false` and a random password;
 configs from before this key keep RCON on). When on, the launcher binds it to `127.0.0.1` only (`--rcon-bind`).
+Factorio only accepts the RCON password on its command line, so other local users can see it in the process list on
+macOS/Linux; keep RCON off on a shared computer.
 Limits: `rate_limit_per_hour` (20 questions per non-host player), `max_requests_per_session` (200 Claude calls per
 companion run), `chat_max_budget_usd` (1.0 per answer), `chat_setting_sources` (`project`), optional
 `allowed_players` (list of names; overrides the in-game setting).

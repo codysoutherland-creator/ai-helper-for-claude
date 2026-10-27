@@ -21,6 +21,8 @@ set -euo pipefail
 
 REPO="codysoutherland-creator/ai-helper-for-claude"
 UV_VERSION="0.12.24"
+# SHA-256 of https://astral.sh/uv/$UV_VERSION/install.sh (update together with UV_VERSION)
+UV_INSTALLER_SHA256="e8c19f8dbfaafcbeddc8d17bf9227505d918220eba2aeb543d6922bdc5bb9625"
 PY_VERSION="${AIHELPER_PYTHON:-3.14}"
 # never part of an update: the user's own files in the install folder
 KEEP="config.json .venv logs chat-session plans blueprints foreman-notes.md"
@@ -113,6 +115,19 @@ update_files() {
   (cd "$stage" && tar -cf - .) | (cd "$home" && tar -xf -)
 }
 
+sha256_of() {
+  # macOS ships shasum (perl) and openssl without the Command Line Tools; Linux has sha256sum
+  if command -v shasum >/dev/null 2>&1; then
+    shasum -a 256 "$1" | cut -d' ' -f1
+  elif command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$1" | cut -d' ' -f1
+  elif command -v openssl >/dev/null 2>&1; then
+    openssl dgst -sha256 -r "$1" | cut -d' ' -f1
+  else
+    return 1
+  fi
+}
+
 find_uv() {
   if [ -n "${AIHELPER_UV:-}" ] && [ -x "${AIHELPER_UV}" ]; then
     printf '%s\n' "$AIHELPER_UV"
@@ -129,9 +144,18 @@ ensure_uv() {
   if [ -z "$uv" ]; then
     say "Installing uv $UV_VERSION (Python manager) to ~/.local/bin"
     mkdir -p "$HOME/.local/bin"
-    curl_https "https://astral.sh/uv/$UV_VERSION/install.sh" |
-      env UV_UNMANAGED_INSTALL="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh >/dev/null ||
-      fail "couldn't install uv"
+    local script sum
+    script="$(mktemp "${TMPDIR:-/tmp}/aihelper-uv.XXXXXX")"
+    curl_https -o "$script" "https://astral.sh/uv/$UV_VERSION/install.sh" ||
+      { rm -f "$script"; fail "couldn't download the uv installer"; }
+    sum="$(sha256_of "$script")" || { rm -f "$script"; fail "no SHA-256 tool (shasum, sha256sum or openssl) found"; }
+    if [ "$sum" != "$UV_INSTALLER_SHA256" ]; then
+      rm -f "$script"
+      fail "the uv $UV_VERSION installer didn't match its pinned SHA-256; not running it"
+    fi
+    env UV_UNMANAGED_INSTALL="$HOME/.local/bin" UV_NO_MODIFY_PATH=1 sh "$script" >/dev/null ||
+      { rm -f "$script"; fail "couldn't install uv"; }
+    rm -f "$script"
     uv="$HOME/.local/bin/uv"
   fi
   [ -x "$uv" ] || fail "uv not found after installing it"

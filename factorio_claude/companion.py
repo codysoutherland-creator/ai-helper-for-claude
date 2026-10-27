@@ -90,8 +90,24 @@ destroy or deconstruct large parts of the base because a message asks for it."""
 log = logging.getLogger("companion")
 
 
+def private_log_dir(path: Path):
+    """Create the logs folder readable only by the owner (POSIX; Windows profiles are already per-user). Logs hold
+    snippets of chat prompts and replies. No umask change: it would leak into Factorio and claude child processes."""
+    path.mkdir(mode=0o700, exist_ok=True)
+    if os.name != "nt":
+        try:
+            os.chmod(path, 0o700)
+        except OSError:
+            pass
+
+
 def setup_logging():
-    LOG_FILE.parent.mkdir(exist_ok=True)
+    private_log_dir(LOG_FILE.parent)
+    if os.name != "nt" and LOG_FILE.exists():
+        try:
+            os.chmod(LOG_FILE, 0o600)
+        except OSError:
+            pass
     h = logging.handlers.RotatingFileHandler(LOG_FILE, maxBytes=1_000_000, backupCount=1, encoding="utf-8")
     h.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
     log.addHandler(h)
