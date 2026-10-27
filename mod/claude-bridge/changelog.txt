@@ -1,0 +1,37 @@
+---------------------------------------------------------------------------------------------------
+Version: 0.4.0
+Date: 2026-10-26
+  Features:
+    - New map setting "Who can use Claude" (host only / host and admins / everyone). Default: host only.
+  Changes:
+    - Public name: AI Helper (for Claude). The internal mod name stays claude-bridge, so existing saves keep working.
+    - In multiplayer, only players allowed by "Who can use Claude" can ask Claude, use the helper buttons and chat
+      commands, clear Claude's ghosts or act on plans. Others get a free one-line explanation.
+    - Running or cancelling a held (expensive) Claude job and approving a plan always need the host or an admin.
+    - Test and cheat ops (simulated chat, clicks and confirmations, instant build, give items) now need the new
+      startup setting "Debug: enable test and cheat ops" (off by default).
+    - Deconstruction requests over the local link are limited to a radius of 64 tiles.
+  Bugfixes:
+    - Incomplete multi-part link requests are capped (16 open, 1 MB) so they can't bloat the save.
+    - Map export folder names are sanitized.
+---------------------------------------------------------------------------------------------------
+Version: 0.3.0
+Date: 2026-10-26
+  Features:
+    - Starter-base planner Plans tab: preview, approve, adjust or reject verified plans; the helper builds and refuels them.
+    - Map and game-data export for the planner.
+    - "Clear Claude's ghosts" removes only ghosts Claude placed.
+    - Cost gate: bigger Claude jobs ask "run it?" first, and every answer shows its cost.
+  Changes:
+    - Markdown is stripped from Claude's chat replies.
+---------------------------------------------------------------------------------------------------
+Version: 0.2.0
+  Features:
+    - Claude panel with Helper, Foreman, Blueprints and Ask Claude tabs (Ctrl+Shift+C).
+    - Free chat keyword commands (@claude help, wood, follow, blueprint ...).
+    - Free rule-based foreman with map alerts.
+    - Local UDP link to the companion (chunked messages), RCON kept as a fallback.
+---------------------------------------------------------------------------------------------------
+Version: 0.1.0
+  Features:
+    - First version: helper character and a /claude command API over RCON.

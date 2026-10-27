@@ -1,0 +1,174 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  UV_VERSION: "0.12.24"
+  PYTHON_VERSION: "3.14"
+
+jobs:
+  test:
+    name: pytest (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: venv + pinned deps
+        shell: bash
+        run: |
+          uv venv --python "$PYTHON_VERSION" .venv
+          if [ "$RUNNER_OS" = Windows ]; then PY=.venv/Scripts/python.exe; else PY=.venv/bin/python; fi
+          echo "PY=$PY" >> "$GITHUB_ENV"
+          uv pip install --python "$PY" --require-hashes -r requirements.lock
+          uv pip install --python "$PY" "pytest==9.1.1"
+      - name: pytest
+        shell: bash
+        run: '"$PY" -m pytest -q tests'
+
+  lua:
+    name: Lua syntax (luac 5.2)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update -q && sudo apt-get install -y -q lua5.2
+      - name: luac -p on every mod file
+        run: |
+          status=0
+          while IFS= read -r -d '' f; do
+            luac5.2 -p "$f" || status=1
+          done < <(find mod tests -name '*.lua' -print0)
+          exit "$status"
+      - name: mod zip + changelog format
+        run: python3 tools/build_mod_zip.py --out "$RUNNER_TEMP/dist"
+
+  shellcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck --version && shellcheck -s bash install.sh
+
+  installer-posix:
+    name: install.sh (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: sandbox (temp HOME, fake Factorio user dir, fake claude CLI)
+        run: |
+          SB="$RUNNER_TEMP/sb"
+          mkdir -p "$SB/home" "$SB/factorio-user/mods" "$SB/bin" "$SB/apps" "$SB/game"
+          echo '{"mods":[{"name":"base","enabled":true}]}' > "$SB/factorio-user/mods/mod-list.json"
+          printf '#!/bin/sh\nexec python3 "%s/tests/fake_claude.py" "$@"\n' "$GITHUB_WORKSPACE" > "$SB/bin/claude"
+          chmod +x "$SB/bin/claude"
+          printf '#!/bin/sh\nexit 0\n' > "$SB/game/factorio"
+          chmod +x "$SB/game/factorio"
+          if [ "$RUNNER_OS" = macOS ]; then
+            APP="$SB/home/Library/Application Support/ai-helper-for-claude"
+          else
+            APP="$SB/home/.local/share/ai-helper-for-claude"
+          fi
+          {
+            echo "SB=$SB"
+            echo "APP=$APP"
+            echo "HOME=$SB/home"
+            echo "XDG_DATA_HOME="
+            echo "FACTORIO_USER_DIR=$SB/factorio-user"
+            echo "AIHELPER_APPS_DIR=$SB/apps"
+            echo "AIHELPER_SOURCE=$GITHUB_WORKSPACE"
+            echo "AIHELPER_SKIP_RUNNING_CHECK=1"
+            echo "CLAUDE_BIN=$SB/bin/claude"
+            echo "FAKE_CLAUDE_STATE=$SB/fake_claude_state.json"
+            echo "FACTORIO_BIN=$SB/game/factorio"
+            echo "FACTORIO_COMPANION_LOCK_PORT=34599"
+          } >> "$GITHUB_ENV"
+      - name: install (piped into bash, like the README one-liner)
+        run: cat install.sh | bash
+      - name: install again (= update; must be idempotent)
+        run: bash install.sh
+      - name: check the result
+        run: |
+          "$APP/.venv/bin/python" tests/installer_smoke.py --app "$APP" --user-dir "$FACTORIO_USER_DIR" \
+            --claude-dir "$HOME/.claude" --fake-state "$FAKE_CLAUDE_STATE" --apps-dir "$AIHELPER_APPS_DIR"
+          "$APP/.venv/bin/python" "$APP/install.py" --check
+      - name: launcher dry run
+        run: |
+          out="$("$APP/.venv/bin/python" "$APP/launcher.py" --dry-run)"
+          echo "$out"
+          echo "$out" | grep -q "would start: $FACTORIO_BIN --enable-lua-udp 34500"
+          echo "$out" | grep -q "would start companion: "
+      - name: without Claude Code (warns, still exits 0)
+        run: |
+          CLAUDE_BIN=/nonexistent bash install.sh
+          "$APP/.venv/bin/python" -c "import json,sys; s=json.load(open(sys.argv[1])); assert s.get('claude_missing') is True, s" \
+            "$APP/logs/install-summary.json"
+      - name: uninstall
+        run: |
+          "$APP/.venv/bin/python" "$APP/install.py" --uninstall
+          test ! -e "$FACTORIO_USER_DIR/mods/claude-bridge"
+          test ! -e "$HOME/.claude/skills/factorio/SKILL.md"
+          ! ls "$AIHELPER_APPS_DIR" | grep -q .
+
+  installer-windows:
+    name: install.ps1 (windows-latest)
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: powershell
+    steps:
+      - uses: actions/checkout@v4
+      - name: sandbox (temp profile, fake Factorio user dir, fake claude CLI)
+        run: |
+          $sb = Join-Path $env:RUNNER_TEMP 'sb'
+          New-Item -ItemType Directory -Force "$sb\home\AppData\Roaming", "$sb\home\AppData\Local", "$sb\factorio-user\mods", "$sb\bin", "$sb\desktop", "$sb\game" | Out-Null
+          Set-Content -Path "$sb\game\factorio.exe" -Value "" 
+          '{"mods":[{"name":"base","enabled":true}]}' | Out-File -Encoding ascii "$sb\factorio-user\mods\mod-list.json"
+          "@echo off`r`npython `"$env:GITHUB_WORKSPACE\tests\fake_claude.py`" %*" | Out-File -Encoding ascii "$sb\bin\claude.cmd"
+          @(
+            "SB=$sb", "USERPROFILE=$sb\home", "HOME=$sb\home",
+            "APPDATA=$sb\home\AppData\Roaming", "LOCALAPPDATA=$sb\home\AppData\Local",
+            "APP=$sb\home\AppData\Local\ai-helper-for-claude",
+            "FACTORIO_USER_DIR=$sb\factorio-user", "AIHELPER_DESKTOP_DIR=$sb\desktop",
+            "AIHELPER_SOURCE=$env:GITHUB_WORKSPACE", "AIHELPER_SKIP_RUNNING_CHECK=1",
+            "CLAUDE_BIN=$sb\bin\claude.cmd", "FAKE_CLAUDE_STATE=$sb\fake_claude_state.json",
+            "FACTORIO_COMPANION_LOCK_PORT=34599", "FACTORIO_BIN=$sb\game\factorio.exe"
+          ) | Out-File -Encoding utf8 -Append $env:GITHUB_ENV
+      - name: install (as a file)
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File install.ps1
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: install again through Invoke-Expression (like the README one-liner)
+        run: |
+          Get-Content -Raw install.ps1 | Invoke-Expression
+          if ($script:AIHelperExit) { exit 1 }
+      - name: check the result
+        run: |
+          & "$env:APP\.venv\Scripts\python.exe" tests\installer_smoke.py --app $env:APP --user-dir $env:FACTORIO_USER_DIR --claude-dir "$env:USERPROFILE\.claude" --fake-state $env:FAKE_CLAUDE_STATE --apps-dir $env:AIHELPER_DESKTOP_DIR
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          & "$env:APP\.venv\Scripts\python.exe" "$env:APP\install.py" --check
+          exit $LASTEXITCODE
+      - name: launcher dry run
+        run: |
+          $out = & "$env:APP\.venv\Scripts\python.exe" "$env:APP\launcher.pyw" --dry-run
+          $out
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          if (-not ($out -match [regex]::Escape("would start: $env:FACTORIO_BIN --enable-lua-udp 34500"))) { exit 1 }
+      - name: uninstall
+        run: |
+          & "$env:APP\.venv\Scripts\python.exe" "$env:APP\install.py" --uninstall
+          if (Test-Path "$env:FACTORIO_USER_DIR\mods\claude-bridge") { exit 1 }
+          if (Test-Path "$env:AIHELPER_DESKTOP_DIR\Factorio (Claude).lnk") { exit 1 }

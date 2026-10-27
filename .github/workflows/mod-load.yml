@@ -1,0 +1,47 @@
+name: Mod loads in Factorio
+
+# Loads the mod (folder and release zip) into the free Linux headless server and pings it over UDP and RCON.
+# The headless server is a public download (no login); it is cached, never committed or redistributed.
+on:
+  push:
+    paths: ["mod/**", "factorio_claude/link.py", "factorio_claude/rcon.py", "tests/headless_mod_load.py",
+            "tools/build_mod_zip.py", ".github/workflows/mod-load.yml"]
+  pull_request:
+    paths: ["mod/**"]
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  FACTORIO_VERSION: "2.1.23"
+
+jobs:
+  headless:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+      - uses: actions/cache@v4
+        id: cache
+        with:
+          path: ~/factorio-headless.tar.xz
+          key: factorio-headless-${{ env.FACTORIO_VERSION }}
+      - name: download the headless server
+        if: steps.cache.outputs.cache-hit != 'true'
+        run: |
+          curl --proto '=https' --tlsv1.2 -fsSL --retry 3 -o ~/factorio-headless.tar.xz \
+            "https://factorio.com/get-download/$FACTORIO_VERSION/headless/linux64"
+      - name: unpack
+        run: tar -xJf ~/factorio-headless.tar.xz -C "$RUNNER_TEMP"
+      - name: mod folder, base game only
+        run: python tests/headless_mod_load.py --factorio "$RUNNER_TEMP/factorio/bin/x64/factorio" --mod mod/claude-bridge
+      - name: release zip, with Space Age
+        run: |
+          python tools/build_mod_zip.py --out "$RUNNER_TEMP/dist"
+          python tests/headless_mod_load.py --factorio "$RUNNER_TEMP/factorio/bin/x64/factorio" \
+            --mod "$RUNNER_TEMP"/dist/claude-bridge_*.zip --expansions --udp-port 34591 --rcon-port 27091

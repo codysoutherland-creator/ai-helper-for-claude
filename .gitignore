@@ -1,0 +1,46 @@
+# --- Python / tooling ---
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+dist/
+build/
+.DS_Store
+Thumbs.db
+
+# --- local user data and secrets (never publish) ---
+config.json
+chat-session/
+logs/
+blueprints/
+plans/
+foreman-notes.md
+*.log
+*.bak-claude
+SKILL.md.new
+
+# --- written by install.py / install.sh into an installed copy ---
+MANIFEST
+launch-factorio-claude.sh
+tests/fake_claude_state.json
+
+# --- local-only notes (scrubbed copies are published in docs/design/) ---
+/SPEC-*.md
+
+# --- test harness: publish the scripts and fixtures, never runtime state ---
+# per-instance server dirs (saves, logs, configs with local paths), GUI client dirs, chat test dirs
+/testenv/inst/
+/testenv/client_*/
+/testenv/chat-test/
+/testenv/_unused/
+# Factorio write-data: saves (regenerate with testenv/make_fixtures.py create), logs, temp
+/testenv/write/
+# generated per machine / per run
+/testenv/config.ini
+/testenv/server.log
+/testenv/acceptance_results.json
+/testenv/bps.json
+/testenv/t1.py
+# restart.ps1 copies the current mod/claude-bridge into each instance; no stale copy here
+/testenv/mods/*
+!/testenv/mods/mod-list.json

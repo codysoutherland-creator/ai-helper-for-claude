@@ -1,0 +1,9 @@
+* text=auto
+# shell scripts must keep LF line endings or bash on macOS/Linux fails ("$'\r': command not found")
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.lua text eol=lf
+mod/claude-bridge/changelog.txt text eol=lf
+*.zip binary
+*.gz binary
+*.png binary

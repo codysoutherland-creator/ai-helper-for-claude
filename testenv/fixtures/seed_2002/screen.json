@@ -1,0 +1,38 @@
+{
+ "seed": 2002,
+ "area": [
+  -200,
+  -200,
+  200,
+  200
+ ],
+ "near_radius": 150,
+ "spawn": {
+  "y": 0,
+  "x": 0
+ },
+ "resources": {
+  "coal": {
+   "tiles": 385,
+   "amount": 322163,
+   "nearest": 52
+  },
+  "copper-ore": {
+   "tiles": 395,
+   "amount": 283735,
+   "nearest": 44
+  },
+  "iron-ore": {
+   "tiles": 604,
+   "amount": 305361,
+   "nearest": 32
+  },
+  "stone": {
+   "tiles": 200,
+   "amount": 179984,
+   "nearest": 48
+  }
+ },
+ "water_tiles": 2470,
+ "water_nearest": 38
+}
