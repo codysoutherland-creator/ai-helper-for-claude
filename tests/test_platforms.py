@@ -1,5 +1,6 @@
 """Cross-platform paths, game/Claude discovery, the launcher's game command and the installer steps (all sandboxed:
 tmp dirs, env overrides and a fake claude CLI; nothing touches a real profile or game)."""
+import importlib.machinery
 import importlib.util
 import json
 import os
@@ -23,7 +24,9 @@ def _os(monkeypatch, name):
 
 
 def _load(name, file):
-    spec = importlib.util.spec_from_file_location(name, ROOT / file)
+    # explicit loader: ".pyw" is only a registered source suffix on Windows
+    loader = importlib.machinery.SourceFileLoader(name, str(ROOT / file))
+    spec = importlib.util.spec_from_file_location(name, ROOT / file, loader=loader)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
