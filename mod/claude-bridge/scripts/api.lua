@@ -466,6 +466,11 @@ function ops.clear_claude_ghosts(args)
       end
     end
   end
+  -- a planner v2 plan's pending dismantle marks go with its ghosts (only that plan's listed entities)
+  if plan and not args.dry_run and api.on_clear_plan then
+    local ok, n = pcall(api.on_clear_plan, plan)
+    if ok and n and n > 0 then r.cancelled_removals = n end
+  end
   return r
 end
 

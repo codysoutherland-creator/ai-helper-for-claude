@@ -11,6 +11,7 @@ require("scripts.foreman")
 require("scripts.blueprint_gen")
 require("scripts.export_map")
 require("scripts.export_data")
+require("scripts.base_state")
 require("scripts.plans")
 require("scripts.gui")
 

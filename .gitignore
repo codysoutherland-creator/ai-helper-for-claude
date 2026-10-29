@@ -44,3 +44,6 @@ tests/fake_claude_state.json
 # restart.ps1 copies the current mod/claude-bridge into each instance; no stale copy here
 /testenv/mods/*
 !/testenv/mods/mod-list.json
+
+# copies of the owner's real saves / map exports (personal; never commit)
+testenv/private/

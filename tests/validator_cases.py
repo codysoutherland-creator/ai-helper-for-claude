@@ -332,3 +332,45 @@ def _splitter(side=False):
 C_SPLIT = _splitter()
 C_SPLIT_SIDE = _splitter(True)
 LIVE += [C_SPLIT, C_SPLIT_SIDE]
+
+
+# ---- 10. planner v2 on-site blocks: burner pairs (drill -> furnace -> inserter -> chest) and drills into chests ----
+def _v2_block(block, ore_name):
+    """PE dicts of a canonical v2 block, the ore under its drills, its hand-fed positions and its chests."""
+    from factorio_claude.planner.gamedata import tiles_of_box
+    ents, res, fuel, chests = [], [], [], []
+    for e in block.entities:
+        ents.append(pe(e.name, e.x, e.y, e.direction, **(e.extra or {})))
+        if (e.extra or {}).get("fuel") == "manual":
+            fuel.append((e.x, e.y))
+        if e.name == "burner-mining-drill":
+            res += [(ore_name, x, y, 5000) for x, y in tiles_of_box(e.x - 1, e.y - 1, e.x + 1, e.y + 1)]
+        if e.name.endswith("chest"):
+            chests.append((e.x, e.y))
+    return ents, res, fuel, chests
+
+
+def _all_chests(chests, item, at_least=1):
+    def f(info, eng):
+        got = [chest_count(info, x, y, item) for x, y in chests]
+        return all(n >= at_least for n in got), f"{item} per chest {got}"
+    return f
+
+
+def _v2_cases():
+    from factorio_claude.planner import blocks as B
+    out = []
+    for side in ("north", "east"):
+        ents, res, fuel, chests = _v2_block(B.burner_pair_row(3, None, output_side=side), "iron-ore")
+        out.append(case(f"v2_burner_pairs_{side}", ents, (), res, expect={}, fuel=fuel, ticks=3600,
+                        works=_all_chests(chests, "iron-plate")))
+    ents, res, fuel, chests = _v2_block(B.drill_to_chest(2, None, resource="coal"), "coal")
+    out.append(case("v2_coal_to_chest", ents, (), res, expect={}, fuel=fuel, works=_all_chests(chests, "coal")))
+    ents, res, fuel, chests = _v2_block(B.drill_to_chest(2, None, resource="stone", output_side="west"), "stone")
+    out.append(case("v2_stone_to_chest_west", ents, (), res, expect={}, fuel=fuel,
+                    works=_all_chests(chests, "stone")))
+    return out
+
+
+V2 = _v2_cases()
+LIVE += V2

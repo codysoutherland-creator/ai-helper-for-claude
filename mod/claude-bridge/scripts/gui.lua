@@ -410,7 +410,26 @@ local function plan_card(sp, p)
     lines[#lines + 1] = s
   end
   local facts = #p.entities .. " entities"
+  local pf = p.facts
+  if type(pf) == "table" then  -- planner v2: stage, first plates, belts, removals
+    local bits = {}
+    if pf.stage then bits[#bits + 1] = tostring(pf.stage) end
+    if type(pf.first_plates_min) == "number" then
+      bits[#bits + 1] = "first plates ~" .. math.max(1, math.floor(pf.first_plates_min + 0.5)) .. " min"
+    end
+    if type(pf.belt_tiles) == "number" then bits[#bits + 1] = pf.belt_tiles .. " belts" end
+    if type(pf.removes) == "number" and pf.removes > 0 then bits[#bits + 1] = pf.removes .. " to dismantle" end
+    if pf.build_now == false then bits[#bits + 1] = "[color=1,0.35,0.35]later stage[/color]" end
+    if #bits > 0 then facts = table.concat(bits, " · ") .. " · " .. facts end
+  end
   if #p.deconstruct > 0 then facts = facts .. " · " .. #p.deconstruct .. " to clear" end
+  if p.removes and #p.removes > 0 then
+    local rc = plans.removal_counts(p)
+    if rc.marked > 0 then
+      facts = facts .. " · dismantled " .. rc.removed .. "/" .. rc.marked
+      if rc.deferred > 0 then facts = facts .. " (" .. rc.deferred .. " ghosts waiting)" end
+    end
+  end
   local v = p.validation
   if v then
     facts = facts .. " · " .. (v.ok and "[color=0.4,0.9,0.4]validated[/color]" or
@@ -460,16 +479,19 @@ local function plan_card(sp, p)
     plan_button(row2, "approve", id, risky and "Approve anyway" or "Approve",
       risky and "red_confirm_button" or "confirm_button_without_tooltip",
       (risky and "The validator found errors in this plan - approving places it anyway. " or "") ..
-      "Places this plan as ghosts (tagged, removable with Clear Claude's ghosts) and marks trees/rocks in the way for removal.")
+      "Places this plan as ghosts (tagged, removable with Clear Claude's ghosts) and marks trees/rocks in the way for removal." ..
+      ((p.removes and #p.removes > 0) and (" It also marks the " .. #p.removes .. " old entities shown in red; the " ..
+        "helper takes exactly those apart first (Reject or Dismiss cancels the marks).") or ""))
     plan_button(row2, "reject", id, "Reject", "red_back_button", "Drop this plan. Nothing is built.")
   else
     plan_button(row, "build", id, "Helper: build", nil,
-      "The helper builds this plan's ghosts (spawning it if needed; it fetches, crafts or mines the materials), " ..
-      "then fills the hand-fed drills/inserters with coal. Free.")
+      "The helper builds this plan's ghosts only (never your own ghosts; spawning it if needed; it fetches, crafts " ..
+      "or mines the materials), then keeps the hand-fed burners fuelled every few minutes until you give it " ..
+      "another order. Free.")
     if #plans.fuel_at(p) > 0 then
       plan_button(row, "refuel", id, "Helper: refuel", nil,
-        "Hand-fed burners (drills, output inserters, boilers) run about 20 minutes on 50 coal: the helper tops " ..
-        "them all up to 50 coal (it gathers coal first if it has none). Free.")
+        "The helper fills this plan's hand-fed burners once (coal drills first, then each pair; it fetches coal " ..
+        "from the plan's coal chests or mines it). Helper: build keeps doing it every few minutes. Free.")
     end
     local row2 = button_row(f)
     plan_button(row2, "unghost", id, "Remove its ghosts", "red_button",
@@ -801,7 +823,7 @@ local function plan_click(player, el)
       st.plan_msg = "Approved " .. title .. ". " .. (r.pending and ("Placing " .. r.total .. " ghosts...") or
         plans.result_text(r))
       -- the helper starts building right away (free); the companion only gets told
-      local hok, hmsg = pcall(agent.work_area, player, p.bbox, "build", title, plans.fuel_at(p))
+      local hok, hmsg = pcall(agent.work_area, player, p.bbox, "build", title, plans.fuel_at(p), id)
       st.plan_msg = st.plan_msg .. " " .. (hok and tostring(hmsg) or "")
       if not hok then log("claude-bridge plan build: " .. tostring(hmsg)) end
       try(transport.ask, player, "approved " .. id, "plan")
@@ -815,7 +837,7 @@ local function plan_click(player, el)
     plans.drop(id)
     st.plan_msg = ""
   elseif action == "build" or action == "refuel" then
-    local ok, msg = pcall(agent.work_area, player, p.bbox, action, title, plans.fuel_at(p))
+    local ok, msg = pcall(agent.work_area, player, p.bbox, action, title, plans.fuel_at(p), id)
     st.plan_msg = ok and tostring(msg) or ("Couldn't start the helper: " .. tostring(msg))
   elseif action == "unghost" then
     plans.unsupersede(id)

@@ -15,7 +15,7 @@ expect (all optional):
   sources/sinks/fluid_sources/fluid_sinks   same as the belt_in/belt_out/pipe_in/pipe_out ports
   power           "external": every pole network counts as fed from outside (only coverage is checked)
   manual_fuel     True (all burners are fuelled by hand) | [entity names] | [(x, y)]; a PE's own
-                  extra {"fuel": "manual"} counts too
+                  extra {"fuel": "manual"} counts too; a lab's extra {"input": "manual"} = packs put in by hand
   containers      {(x, y): [items]} known chest contents (otherwise unfilled chests count as "unknown contents")
   rates           {item: per_min} planned output; also turns throughput shortfalls into errors
   strict          True: throughput shortfalls (inserters, power, fluids) are errors instead of warnings
@@ -1171,8 +1171,8 @@ class _Validator:
             if r.type == "assembling-machine" and not r.recipe:
                 self.err("recipe", r, f"{r.label} has no recipe set")
                 continue
-            if r.type == "lab":
-                if not r.inputs:
+            if r.type == "lab":   # extra {"input": "manual"}: packs go in by hand (planner v2 stage 2)
+                if not r.inputs and (r.extra or {}).get("input") != "manual":
                     self.err("machine_input", r, f"{r.label} never receives science packs")
                 continue
             if "*" in r.inputs:

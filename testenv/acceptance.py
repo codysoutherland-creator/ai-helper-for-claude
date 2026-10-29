@@ -23,6 +23,13 @@ Test scaffolding (documented, not part of the plan):
   - bootstrap refuel: the helper gets 50 coal per hand-fed burner handed to it (agent_give: the coal the player would
     give it), then does the refuel itself (walking to every hand-fed burner of the plan).
 
+--no-cheat (planner v2): a player-like server (-NoDebugOps); none of the build/fuel scaffolding above: after plan_apply
+the real helper does Approve's work (plan_helper build: S0 coal takes, listed dismantling, gathering + crafting from
+nothing, building only this plan's ghosts site by site, then its coal round). The first plate is measured against the
+plan's eta.first_plates (within 50 %), then the usual measuring window. Planner v2 builds stage 1 here; its placed
+stage 2 (power + labs, approved after stage 1 runs) is checked in-engine by tests/live_onsite.py --stage2-minutes, and
+stage 3 is still an estimate, so --stages electric is skipped for v2.
+
 PASS (all seeds/stages/variants): validation ok; 0 blocked ghosts; iron/copper/brick measured >= 90 % of plan in the
 measuring window; no machine stalled for a design reason (furnace crafts < 90 % of its share, drill/boiler/engine/
 inserter out of fuel or power at any sample; a drill on depleted ore is allowed); electric: one network, no consumer
@@ -51,10 +58,10 @@ ELECTRIC_TECHS = ["automation-science-pack", "electronics", "automation", "steam
                   "logistics"]
 
 
-def restart(name, slot, save=None, stop=False):
+def restart(name, slot, save=None, stop=False, no_debug=False):
     args = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(ROOT / "testenv" / "restart.ps1"),
             "-Name", name, "-Slot", str(slot)]
-    args += ["-Stop"] if stop else ["-Save", save]
+    args += ["-Stop"] if stop else (["-Save", save] + (["-NoDebugOps"] if no_debug else []))
     with tempfile.TemporaryFile() as f:  # never pipe: the started factorio.exe would keep the pipe open
         subprocess.run(args, stdout=f, stderr=f, timeout=120)
 
@@ -78,7 +85,7 @@ class Slot:
         return json.loads(self.lua(code))
 
     def fresh(self, seed, stage):
-        restart(self.a.name, self.a.slot, f"seed_{seed}.zip")
+        restart(self.a.name, self.a.slot, f"seed_{seed}.zip", no_debug=self.a.no_cheat)
         self.rcon._client = self.rcon.Rcon("127.0.0.1", 27016 + self.a.slot, "testpw")
         for _ in range(40):
             try:
@@ -103,15 +110,21 @@ class Slot:
 
 # ---------------------------------------------------------------- planning
 
-def plan_python(slot, stage):
-    from factorio_claude.planner import placer
+def plan_python(slot, stage, planner="v2"):
+    from factorio_claude.planner import placer, staged
     from factorio_claude.planner.gamedata import GameData
+    from factorio_claude.planner.state import BaseState
     from factorio_claude.planner.world import World
     t0 = time.time()
     world = World.from_link(area=(-200, -200, 200, 200), link=slot.link.call, charted=False)
     gd = GameData.from_link(link=slot.link)
     t1 = time.time()
-    plans = placer.plan_variants(world, gd, {"stage": stage, "near": (0.0, 0.0)})
+    if planner == "v2":  # every build-now variant (later stages like the long-term hub are not built here)
+        st = BaseState.from_link(slot.link.call, 0, 0)
+        plans = [p for p in staged.plan_options(world, gd, st, {"near": (0.0, 0.0)}, variants=4)
+                 if p.stats.get("build_now", True)]
+    else:
+        plans = placer.plan_variants(world, gd, {"stage": stage, "near": (0.0, 0.0)})
     return plans, {"export_s": round(t1 - t0, 1), "plan_s": round(time.time() - t1, 1), "path": "python"}, gd, world
 
 
@@ -138,7 +151,7 @@ def plan_mcp(stage, plans_dir):
     out = json.loads(text) if text.startswith("{") else {"error": text}
     if "plans" not in out:
         raise RuntimeError(f"MCP plan_starter_base failed: {text[:600]}")
-    plans = [Plan.load(Path(plans_dir) / f"{b['id']}.json") for b in out["plans"]]
+    plans = [Plan.load(Path(plans_dir) / f"{b['id']}.json") for b in out["plans"] if b.get("build_now", True)]
     return plans, {"tool_s": round(time.time() - t0, 1), "path": "mcp", "tool_reply_chars": len(text),
                    "preview_errors": [b.get("preview_error") for b in out["plans"] if b.get("preview_error")]}
 
@@ -181,6 +194,10 @@ end
 rcon.print(helpers.table_to_json{n, other})""" % json.dumps(plan.id))
     check("ghosts_tagged", tagged[0] == len(plan.entities), tagged)
 
+    if a.no_cheat:  # the real helper builds and fuels it (no revive, no coal handed out)
+        real_build(slot, plan, a, res, check)
+        return ok
+
     # build: clear what plan_apply marked for deconstruction, revive every ghost (test cheat)
     built = slot.jlua("""
 local s = game.surfaces.nauvis
@@ -209,7 +226,7 @@ rcon.print(n)""" % json.dumps(manual))
     check("fuel_seeded", fed == len(manual), res["fuel_seeded"])
 
     # bus sinks (scaffolding: nothing consumes plates yet)
-    sinks = [[p[2] + 0.5, p[3] + 0.5, p[4]] for p in plan.stats["ports"]]
+    sinks = [[p[2] + 0.5, p[3] + 0.5, p[4]] for p in plan.stats.get("ports") or []]  # v2 on-site rows: chests
     nsink = slot.jlua("""
 local s, n = game.surfaces.nauvis, 0
 local V = {[0] = {0, -1}, [4] = {1, 0}, [8] = {0, 1}, [12] = {-1, 0}}
@@ -226,6 +243,63 @@ rcon.print(n)""" % json.dumps(sinks))
 
     measure(slot, plan, a, res, check, manual)  # its checks go through check() and clear ok
     return ok
+
+
+MADE_LUA = """
+local s, n, built = game.surfaces.nauvis, 0, 0
+for _, r in pairs(helpers.json_to_table([==[%s]==])) do
+  local e = s.find_entity(r[1], {r[2], r[3]})
+  if e then
+    built = built + 1
+    if e.type == 'furnace' then n = n + e.products_finished end
+  end
+end
+rcon.print(helpers.table_to_json{tick = game.tick, made = n, built = built})"""
+
+
+def real_build(slot, plan, a, res, check):
+    """--no-cheat: Approve's real follow-up (plan_helper build: S0 coal takes, listed dismantling, gathering, crafting,
+    building only this plan's ghosts, then the coal round) at game.speed; first plate measured against
+    eta.first_plates (within 50 %), then the usual measuring window once the plan's ETA to full rate has passed."""
+    eta = plan.stats.get("eta") or {}
+    ents = [[e.name, e.x, e.y] for e in plan.entities]
+    slot.lua(f"game.speed = {a.speed}")
+    t0 = int(slot.lua("rcon.print(game.tick)"))
+    r = slot.call("plan_helper", id=plan.id, what="build")
+    res["helper"] = r.get("msg")
+    first, last = None, None
+    full = eta.get("target") or eta.get("complete") or 15
+    until = t0 + int((min(60.0, max(full + 2, (eta.get("complete") or 0) + 2))) * 3600)
+    log, seen = [], set()
+    while True:
+        last = slot.jlua(MADE_LUA % json.dumps(ents))
+        if first is None and last["made"] > 0:
+            first = last["tick"]
+        for x in (slot.call("agent_status") or {}).get("log") or []:   # the helper keeps only 25 lines
+            k = (x.get("tick"), x.get("msg"))
+            if k not in seen:
+                seen.add(k)
+                log.append(f"{round((x.get('tick', t0) - t0) / 3600, 2)} {x.get('msg')}")
+        if last["tick"] >= until and first is not None:
+            break
+        if last["tick"] >= t0 + 60 * 3600:   # an hour of game time without plates: give up
+            break
+        time.sleep(0.3)
+    res["helper_history"] = [ln for ln in log if not ln.split(" ", 1)[1].startswith(("done: take", "took "))][:150]
+    meas = round((first - t0) / 3600, 2) if first else None
+    pred = eta.get("first_plates")
+    res["first_plates"] = {"predicted": pred, "measured": meas, "built": last["built"], "planned": len(ents)}
+    check("first_plates", meas is not None, res["first_plates"])
+    if meas is not None and pred:
+        check("first_plates_within_50pct", abs(meas - pred) <= 0.5 * pred + 0.25, res["first_plates"])
+    st = slot.call("agent_status") or {}
+    res["helper_log"] = [x["msg"] for x in st.get("log") or []]
+    res["build_order"] = plan.stats.get("build_order_names")
+    slot.lua("game.speed = 1")
+    measure(slot, plan, a, res, check, ())
+    end = slot.jlua(MADE_LUA % json.dumps(ents))   # by the end of the measuring window everything is built
+    res["first_plates"]["built_at_end"] = end["built"]
+    check("all_built", end["built"] == len(ents), res["first_plates"])
 
 
 SAMPLE_LUA = """
@@ -259,7 +333,9 @@ local s, ok, low = game.surfaces.nauvis, 0, {}
 for _, m in pairs(helpers.json_to_table([==[%s]==])) do
   local e = s.find_entity(m[3], {m[1], m[2]})
   local n = e and e.get_fuel_inventory() and e.get_fuel_inventory().get_item_count('coal') or 0
-  if n >= %d then ok = ok + 1 elseif #low < 5 then low[#low + 1] = {m[3], m[1], m[2], n} end
+  -- a burner inserter's fill is 5 coal (it burns very little), drills and furnaces get 30-50
+  local want = (e and e.type == 'inserter') and math.min(%d, 3) or %d
+  if n >= want then ok = ok + 1 elseif #low < 5 then low[#low + 1] = {m[3], m[1], m[2], n} end
 end
 rcon.print(helpers.table_to_json{ok = ok, low = low})"""
 
@@ -279,7 +355,8 @@ def measure(slot, plan, a, res, check, manual=()):
     slot.lua(f"game.speed = {a.speed}")
     start = int(slot.lua("rcon.print(game.tick)"))
     minutes = a.boot_minutes if plan.stage == "bootstrap" else a.minutes
-    refuel_at = start + int(a.refuel_at * 3600) if plan.stage == "bootstrap" and a.refuel_at else None
+    refuel_at = start + int(a.refuel_at * 3600) if plan.stage == "bootstrap" and a.refuel_at and not a.no_cheat \
+        else None
     hand = None
     total = int(minutes * 3600)
     warm = int(min(a.warmup, minutes / 2) * 3600)
@@ -302,7 +379,7 @@ def measure(slot, plan, a, res, check, manual=()):
             hand = helper_refuel(slot, plan, manual, res, check)
         elif hand is not None and "after" not in res["refuel"] and t >= refuel_at + 4 * 3600:
             st = slot.call("agent_status") or {}
-            res["refuel"]["after"] = slot.jlua(FUEL_LUA % (json.dumps(hand), 25))
+            res["refuel"]["after"] = slot.jlua(FUEL_LUA % (json.dumps(hand), 25, 25))
             res["refuel"]["log"] = [x["msg"] for x in st.get("log") or [] if "refuel" in x["msg"] or "Stopped" in x["msg"]][-3:]
             check("helper_refuel", res["refuel"]["after"]["ok"] == len(hand), res["refuel"])
     slot.lua("game.speed = 1")
@@ -323,12 +400,16 @@ def measure(slot, plan, a, res, check, manual=()):
         if w:
             check(f"rate_{item}", ratio >= THRESHOLD, res["rates"][item])
     # per-furnace crafts over the window vs its share (a furnace below 90 % of the plan rate is stalled by design)
+    # only the plan's own machines are judged (a map may hold idle old builds, e.g. the sprawl fixture)
+    mine = {(float(e.x), float(e.y)) for e in plan.entities}
     f0 = {(x, y): n for x, y, n in first["furnaces"]}
-    crafts = sorted(((n - f0.get((x, y), 0)), (x, y)) for x, y, n in last["furnaces"])
+    crafts = sorted(((n - f0.get((x, y), 0)), (x, y)) for x, y, n in last["furnaces"] if (x, y) in mine)
     speed = {"stone-furnace": 1.0, "steel-furnace": 2.0, "electric-furnace": 2.0}
     fname = next((e.name for e in plan.entities if e.name in speed), "stone-furnace")
     # stone brick takes 3.2 s too (2 stone -> 1 brick): every vanilla smelting recipe is 3.2 s
     expect = mins * 60 / (3.2 / speed[fname])
+    if "units" in plan.stats:  # planner v2 burner pairs: one burner drill (15 ore/min) feeds each furnace
+        expect = min(expect, mins * 15.0)
     slow = [(c, xy) for c, xy in crafts if c < THRESHOLD * expect]
     res["furnaces"] = {"count": len(crafts), "expected_crafts_each": round(expect, 1),
                        "min_crafts": crafts[0][0] if crafts else None, "slow": slow[:6]}
@@ -336,7 +417,7 @@ def measure(slot, plan, a, res, check, manual=()):
     # status samples (one per in-game minute): an entity out of fuel / power in two samples in a row has stopped
     # (stalled); seen once only = a momentary gap (e.g. the coal lane still filling right after warm-up) - those are
     # recorded as blips, and the per-furnace craft count above still catches any furnace that lost output.
-    seen = [{(b[0], b[2], b[3]): b[1] for b in (smp.get("bad") or [])} for smp in samples]
+    seen = [{(b[0], b[2], b[3]): b[1] for b in (smp.get("bad") or []) if (b[2], b[3]) in mine} for smp in samples]
     stalled = sorted({(k[0], st, k[1], k[2]) for prev, cur in zip(seen, seen[1:]) for k, st in cur.items() if k in prev})
     blips = [[smp["tick"]] + b for smp in samples for b in (smp.get("bad") or [])]
     res["status_last"] = last["status"]
@@ -423,6 +504,7 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[1001, 2002, 3003])
     ap.add_argument("--stages", nargs="+", default=["bootstrap", "electric"])
     ap.add_argument("--variants", default="all", help="all | comma list of indices (0 = first variant)")
+    ap.add_argument("--planner", default="v2", choices=("v1", "v2"), help="v2 = staged.plan_options (default)")
     ap.add_argument("--minutes", type=float, default=12, help="in-game minutes run per electric variant (>= 10)")
     ap.add_argument("--boot-minutes", type=float, default=32,
                     help="in-game minutes per bootstrap variant (longer than one load of hand fuel lasts)")
@@ -435,7 +517,16 @@ def main():
     ap.add_argument("--claude-seed", type=int, default=1001, help="0 = skip the real Claude round trip")
     ap.add_argument("--claude-only", action="store_true")
     ap.add_argument("--out", default=str(ROOT / "testenv" / "acceptance_results.json"))
+    ap.add_argument("--no-cheat", action="store_true",
+                    help="player-like server (-NoDebugOps): the real helper builds and fuels the plan (plan_helper "
+                         "build), nothing is revived or handed out; first plates measured against the plan's ETA")
     a = ap.parse_args()
+    if a.planner == "v2" and "electric" in a.stages:
+        # planner v2: stage 1 is built here; stage 2 (placed) by tests/live_onsite.py --stage2-minutes; stage 3 is an
+        # estimate on the cards
+        print("note: planner v2 builds stage 1 here (stage 2: tests/live_onsite.py --stage2-minutes; stage 3 is an "
+              "estimate): the 'electric' stage is skipped; use --planner v1 for the electric hub")
+        a.stages = [s for s in a.stages if s != "electric"] or ["bootstrap"]
 
     plans_dir = Path(tempfile.mkdtemp(prefix="plans_accept_"))
     os.environ.update({"FACTORIO_UDP_PORT": str(34500 + a.slot), "FACTORIO_RCON_PORT": str(27016 + a.slot),
@@ -463,7 +554,7 @@ def main():
                         plans, info = plan_mcp(stage, plans_dir)
                         gd = GameData.from_link(link=slot.link)
                     else:
-                        plans, info, gd, _ = plan_python(slot, stage)
+                        plans, info, gd, _ = plan_python(slot, stage, a.planner)
                 except Exception as e:  # noqa: BLE001
                     print("!! planning failed:", e)
                     results["seeds"][key] = {"ok": False, "error": str(e)}

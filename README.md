@@ -74,18 +74,41 @@ Chat works too: `@claude help` lists the free keyword commands (`@claude wood 20
 1. Ask: `@claude set me up with a starter base` (or type it in the Ask Claude tab).
 2. Cost gate: "This looks like a planning job (≈ $0.05–0.30). Run it?" Click **Run** (or `@claude run`). About
    $0.03 and under a minute.
-3. Claude runs the planner once. It reads the map and proposes 2-3 variants (Compact hub / Balanced hub / Expandable
-   bus) in the **Plans** tab. Every variant has already passed the validator.
-4. **Preview** a variant (overlay in the world and on the map; another Preview hides it), then **Approve** one.
-   Approving places tagged ghosts, marks trees/rocks in the way for removal, and starts the helper (spawned if needed).
-   The helper builds everything. It takes materials from nearby chests, then your inventory (mod setting), and
-   crafts, smelts or mines the rest. It chops trees in the way, then fills the hand-fed burners with coal.
+3. Claude runs the planner once. It reads the map **and your actual state**: what you and the helper carry, nearby
+   chests, your machines (working or idle), production and research. It proposes up to 4 variants in the **Plans**
+   tab, each a different build, and every one has already passed the validator:
+   - **Quick start**: burner drills straight into stone furnaces on the edge of the iron patch. No belts. Iron plates
+     in minutes, cheapest bill.
+   - **Balanced**: iron and copper smelted on their own patches from the start.
+   - **Long-term**: a central smelting hub with a bus, but only when the ore belts to it are short. On a map with
+     far-apart patches it becomes "grow on site" (twice the smelting on the patches) and says why the hub was
+     rejected (for example "1226 belt tiles, longest run 290").
+   - **Rebuild** (only when it clearly pays off): takes apart or converts specific old builds of yours that sit
+     idle or in the way. It lists exactly what it removes (count, position, reason) and the net gain. Saying "tidy
+     up my old stuff" lowers the bar. It never replaces the whole base by default and never touches labs or your own
+     ghosts.
+
+   Every card shows the **bill** (what it needs, what you have, salvage from removed builds, what is short), the
+   **ETA** (minutes to first plates and to full rate, from a model of what the helper really does: gathering,
+   building site by site, carrying coal), plates/min, belt length (total and longest run), footprint, a one-line
+   trade-off and quality warnings (bill far beyond what you can get soon, very long belts, hub far from the iron,
+   water ignored). Before building anything new it reuses what you have, for example by taking the coal out of idle
+   machines to start the new burners.
+4. **Preview** a variant (overlay in the world and on the map; another Preview hides it). Entities a Rebuild variant
+   would remove are drawn in red. Then **Approve** one. Approving marks exactly the listed entities for removal
+   (Reject or Dismiss cancels the marks that are left), places tagged ghosts, marks trees/rocks in the way, and
+   starts the helper (spawned if needed). The helper takes the listed coal, dismantles the listed builds (their items
+   go to its inventory), then builds everything. It takes materials from nearby chests, then your inventory (mod
+   setting), and crafts, smelts or mines the rest.
    The other variants on the same ground are greyed out ("Replaced by ..."). Use Remove its ghosts to switch.
-5. The burner (bootstrap) base: burner drills and the furnaces' output inserters have no coal feed (2.1 has no burner
-   leech), so they run about 22 minutes on 50 coal each. Press **Helper: refuel** on the plan about every 20 minutes.
-   The helper tops them up. If it has no coal, it gathers some first. Furnaces get their coal by belt.
-6. Later, ask for the electric stage (`@claude plan the electric stage`). This adds steam power, electric drills and
-   inserters, which need no hand fuel after the first few coal in the boilers.
+5. The burner (bootstrap) stage has no coal belts. Its coal drills fill chests, and the helper carries coal to the
+   burners every few minutes until you give it another order (**Helper: refuel** or `plan_helper(id, "round")`
+   restarts the round). The card says how much of the helper's time that takes; without the helper the burners run
+   dry in about 20 minutes.
+6. Every variant carries a checked **stage 2** on the same footprint: a hand-fed steam engine at the nearest water,
+   poles to your idle labs (powered where they stand) or new labs, copper pairs if stage 1 had none, with its own bill
+   and when red science research can start. Ask Claude for it once stage 1 runs, then approve it in the Plans tab.
+   Red science packs are hand-crafted (you or the helper) in this release.
 
 ### Cost gate
 
@@ -109,8 +132,8 @@ In Claude Code you can still say "check my base", "set me up with a starter base
 
 | Piece | Where | What |
 |---|---|---|
-| `claude-bridge` mod (0.4.0) | `mod/claude-bridge` (linked into Factorio's `mods` folder: `%APPDATA%\Factorio`, `~/Library/Application Support/factorio`, `~/.factorio`) | GUI, free helper/foreman/blueprints, plan overlay + tagged ghost placement (`scripts/plans.lua`), map/game-data export to script-output, UDP + `/claude <json>` RCON API, Claude inbox |
-| planner | `factorio_claude/planner/` | world model (`world.py`, `grid.py`), game data (`gamedata.py`), rate solver (`rates.py`), verified blocks (`blocks.py`), A* belt/pipe router + pole placer (`router.py`), starter-base placer (`placer.py`, `plan.py`), static validator (`validate.py`) |
+| `claude-bridge` mod (0.4.1) | `mod/claude-bridge` (linked into Factorio's `mods` folder: `%APPDATA%\Factorio`, `~/Library/Application Support/factorio`, `~/.factorio`) | GUI, free helper/foreman/blueprints, plan overlay + tagged ghost placement (`scripts/plans.lua`), map/game-data export to script-output, UDP + `/claude <json>` RCON API, Claude inbox |
+| planner | `factorio_claude/planner/` | world model (`world.py`, `grid.py`), game data (`gamedata.py`), rate solver (`rates.py`), verified blocks (`blocks.py`), A* belt/pipe router + pole placer (`router.py`), starter-base placer (`placer.py`, `plan.py`), staged on-site planner with state, bill/ETA and rebuild review (`staged.py`, `onsite.py`, `state.py`, `cost.py`, `agenda.py`, `existing.py`, `stage2.py`), quality gates (`quality.py`), static validator (`validate.py`) |
 | launcher | `launcher.py` (Windows shortcut: `pythonw launcher.pyw`; macOS: `Factorio (Claude).app`; Linux: menu entry) | starts Factorio with `--enable-lua-udp 34500 ...` (the game binary directly when Steam is already running or for a standalone copy, else `steam -applaunch 427520`) + companion |
 | platform paths | `factorio_claude/platforms.py` | Factorio user dir, Steam/Factorio/Claude Code discovery, venv python, detached processes, dialogs, clipboard per OS |
 | installers | `install.sh` (macOS/Linux), `install.ps1` (Windows) -> `install.py` | one-line bootstrap, then the cross-platform setup (`--check`, `--uninstall`) |
@@ -120,10 +143,13 @@ In Claude Code you can still say "check my base", "set me up with a starter base
 | Skill | `~/.claude/skills/factorio/SKILL.md` | playbooks for Claude Code |
 
 How a plan is made: the mod exports the charted map (`export_map`: water, resources, trees/rocks/cliffs, your
-entities) and the game data (`export_data`: prototypes, recipes, research) as files to script-output. The planner
-picks ore/coal patches and a hub site, places mines, a smelting hub with mixed ore/coal lanes and a bus, routes the
-belts (A*, no undergrounds until logistics is researched), adds steam power and poles for the electric stage, and
-runs the validator. The validator checks belts, lanes, inserters, fuel (including what burner inserters burn
+entities) and the game data (`export_data`: prototypes, recipes, research) as files to script-output, plus a
+snapshot of your state (inventories, chests, machine status, production, research). The planner groups your existing
+builds into clusters and decides for each one keep / reuse / replace. It weighs on-site smelting against a central
+hub using real distances (iron counts most, then copper, coal, stone), places burner pairs on the patch edges or a
+hub with mixed ore/coal lanes and a bus, routes any belts (A*, no undergrounds until logistics is researched), places
+stage 2 (steam power, poles, labs) on the same footprint, prices every variant (bill and ETA) and runs the quality
+gates and the validator. The validator checks belts, lanes, inserters, fuel (including what burner inserters burn
 themselves), power, fluids, terrain and research, and checks that nothing touches your existing belts. Anything that
 fails is dropped and the next candidate is tried. Plans are saved in `plans/` and shown in the Plans tab.
 

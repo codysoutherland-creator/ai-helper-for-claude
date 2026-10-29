@@ -6,6 +6,10 @@
 -- The overlay is plain rendering objects (no per-tick work): merged same-kind tile rectangles (game + map view),
 -- outlines/icons for big entities, flow arrows for belts/inserters, red boxes for obstacles to clear.
 -- Every ghost plan_apply places carries tags.claude_plan = id and has no last_user, so clear_claude_ghosts finds it.
+-- Planner v2 rebuilds: p.removes = {{name, x, y, unit?}...} existing entities of the force the plan dismantles. They are
+-- drawn red ("To dismantle (yours)"); approve orders deconstruction of exactly those (p.removing[unit] = row), places
+-- the ghosts that don't overlap them and defers the rest (p.deferred) until the helper (task "dismantle") or the
+-- player has removed them. Reject / Dismiss / plan_drop / clear_claude_ghosts {plan} cancel every remaining mark.
 
 local api = require("scripts.api")
 local util = require("scripts.util")
@@ -18,6 +22,7 @@ local MAX_BLOCKED = 50    -- blocked entries listed in an apply result
 local ARROW_LIMIT = 20000 -- skip flow arrows beyond this
 local SLICE = 1500        -- entities drawn / applied per tick (~25 ms); smaller plans are done at once
 local CLEARABLE = {"tree", "simple-entity"}  -- what plan_apply may order deconstructed
+local MAX_REMOVES = 2000  -- existing entities one plan may dismantle
 
 -- legend: kind -> {caption, r, g, b}; fills are drawn translucent
 plans.LEGEND = {
@@ -31,6 +36,7 @@ plans.LEGEND = {
   {"storage", "Chests", 0.75, 0.75, 0.75},
   {"other", "Other", 1, 1, 1},
   {"clear", "To clear (trees/rocks)", 1, 0.2, 0.2},
+  {"remove", "To dismantle (yours)", 1, 0.05, 0.05},
 }
 local LEG = {}
 for _, l in ipairs(plans.LEGEND) do LEG[l[1]] = l end
@@ -233,6 +239,26 @@ local function draw_step(p, n)
     local x, y = math.floor(d[1]), math.floor(d[2])
     mark("clear", {x, y, x + 1, y + 1})
   end
+  local red = rgba(LEG.remove, 0.95)
+  for _, rm in ipairs(p.removes or {}) do
+    local ent = plans.find_listed(surface, p, rm)
+    local b
+    if ent then
+      local bb = ent.bounding_box
+      b = {bb.left_top.x, bb.left_top.y, bb.right_bottom.x, bb.right_bottom.y}
+    else
+      local tb = box_of({rm[1], rm[2], rm[3], 0})
+      b = {tb[1], tb[2], tb[3], tb[4]}
+    end
+    for _, mode in ipairs({"game", "chart"}) do
+      objs[#objs + 1] = rendering.draw_rectangle{surface = surface, forces = forces, color = red, width = 3,
+        filled = false, render_mode = mode, left_top = {b[1], b[2]}, right_bottom = {b[3], b[4]}}
+      objs[#objs + 1] = rendering.draw_line{surface = surface, forces = forces, color = red, width = 2,
+        render_mode = mode, from = {b[1], b[2]}, to = {b[3], b[4]}}
+      objs[#objs + 1] = rendering.draw_line{surface = surface, forces = forces, color = red, width = 2,
+        render_mode = mode, from = {b[1], b[4]}, to = {b[3], b[2]}}
+    end
+  end
   for kind, rows in pairs(by_kind) do
     local l = LEG[kind]
     local fill, chart = rgba(l, kind == "clear" and 0.25 or 0.3), rgba(l, 0.85)
@@ -376,8 +402,90 @@ api.register("plan_preview", function(args)
       bad = bad + 1
     end
   end
+  if args.removes ~= nil and not (args.append and p.removes) then p.removes = {} end
+  for _, d in pairs(args.removes or {}) do
+    local name, x, y, unit
+    if type(d) == "table" then name, x, y, unit = d.name or d[1], d.x or d[2], d.y or d[3], d.unit or d[4] end
+    if type(name) == "string" and type(x) == "number" and type(y) == "number" and #p.removes < MAX_REMOVES then
+      p.removes[#p.removes + 1] = {name, x, y, tonumber(unit)}
+    else
+      bad = bad + 1
+    end
+  end
+  if type(args.facts) == "table" then p.facts = args.facts end
+  -- S0 fuel takes: {{name, x, y, unit?, item, count}} coal out of listed idle machines of the base (planner v2)
+  if args.takes ~= nil and not (args.append and p.takes) then p.takes = {} end
+  for _, d in pairs(args.takes or {}) do
+    local name, x, y, unit, item, count
+    if type(d) == "table" then name, x, y, unit, item, count = d[1], d[2], d[3], d[4], d[5], d[6] end
+    if type(name) == "string" and type(x) == "number" and type(y) == "number" and type(item) == "string" and
+        type(count) == "number" and #p.takes < MAX_REMOVES then
+      p.takes[#p.takes + 1] = {name, x, y, tonumber(unit), item, math.floor(count)}
+    else
+      bad = bad + 1
+    end
+  end
+  -- S0 repairs: existing burners of the base the helper refuels {{name, x, y, unit?, n}} (planner v2)
+  if args.refuel_existing ~= nil then
+    p.refuel_existing = {}
+    for _, d in pairs(args.refuel_existing) do
+      if type(d) == "table" and type(d[1]) == "string" and type(d[2]) == "number" and type(d[3]) == "number" and
+          #p.refuel_existing < 500 then
+        p.refuel_existing[#p.refuel_existing + 1] = {d[1], d[2], d[3], tonumber(d[4]), tonumber(d[5]) or 10}
+      else
+        bad = bad + 1
+      end
+    end
+  end
+  -- the plan's sites in build order {{x0, y0, x1, y1}}: the helper gathers for and builds one after the other
+  if args.build_order ~= nil then
+    p.build_order = {}
+    for _, d in pairs(args.build_order) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and type(d[3]) == "number" and
+          type(d[4]) == "number" and #p.build_order < 32 then
+        p.build_order[#p.build_order + 1] = {d[1], d[2], d[3], d[4]}
+      end
+    end
+  end
+  -- a later stage: the previous stage's hand-fed burners {{x, y, n}} stay in this plan's coal round (a new round
+  -- replaces the old one), and its output chests {{x, y}} are where the helper takes materials from first
+  if args.keep_fuelled ~= nil then
+    p.keep_fuelled = {}
+    for _, d in pairs(args.keep_fuelled) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and #p.keep_fuelled < 500 then
+        p.keep_fuelled[#p.keep_fuelled + 1] = {d[1], d[2], tonumber(d[3]) or 10}
+      end
+    end
+  end
+  if args.reserve ~= nil then   -- {{x0, y0, x1, y1}}: the next stage's ground (the helper builds no smelter there)
+    p.reserve = {}
+    for _, d in pairs(args.reserve) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and type(d[3]) == "number" and
+          type(d[4]) == "number" and #p.reserve < 500 then
+        p.reserve[#p.reserve + 1] = {d[1], d[2], d[3], d[4]}
+      end
+    end
+  end
+  if args.take_from ~= nil then
+    p.take_from = {}
+    for _, d in pairs(args.take_from) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and #p.take_from < 64 then
+        p.take_from[#p.take_from + 1] = {d[1], d[2]}
+      end
+    end
+  end
+  -- the plan's coal chests {{x, y}}: where its logistics round takes coal from first
+  if args.coal_from ~= nil then
+    p.coal_from = {}
+    for _, d in pairs(args.coal_from) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and #p.coal_from < 64 then
+        p.coal_from[#p.coal_from + 1] = {d[1], d[2]}
+      end
+    end
+  end
   compute_bbox(p)
-  local out = {id = id, entities = #p.entities, deconstruct = #p.deconstruct, bad_rows = bad, bbox = p.bbox}
+  local out = {id = id, entities = #p.entities, deconstruct = #p.deconstruct, bad_rows = bad, bbox = p.bbox,
+    removes = p.removes and #p.removes or 0}
   local u = {}
   for n in pairs(unknown) do u[#u + 1] = n end
   if #u > 0 then out.unknown = u end
@@ -411,7 +519,10 @@ local function plan_info(p, full)
   local o = {id = p.id, title = p.title, variant = p.variant, stage = p.stage, group = p.group, status = p.status,
     entities = #p.entities, deconstruct = #p.deconstruct, surface = p.surface, force = p.force, shown = p.shown or false,
     drawing = p.draw ~= nil, superseded = p.superseded,
-    summary = p.lines, warnings = p.warnings, validation = p.validation, bbox = p.bbox, tick = p.tick, result = p.result}
+    summary = p.lines, warnings = p.warnings, validation = p.validation, bbox = p.bbox, tick = p.tick, result = p.result,
+    facts = p.facts}
+  if p.removes and #p.removes > 0 then o.removes = plans.removal_counts(p) end
+  if p.takes and #p.takes > 0 then o.takes = {listed = #p.takes, done = p.takes_done or false} end
   if full then o.counts = entity_brief(p) end
   return o
 end
@@ -439,12 +550,13 @@ end)
 api.register("plan_get", function(args)
   local p = get(args.id)
   local o = plan_info(p, true)
-  if args.entities then o.rows = p.entities; o.deconstruct_rows = p.deconstruct end
+  if args.entities then o.rows = p.entities; o.deconstruct_rows = p.deconstruct; o.removes_rows = p.removes end
   return o
 end)
 
 function plans.drop(id)
   local p = get(id)
+  plans.cancel_removal(p)
   hide(p)
   storage.plans[p.id] = nil
   changed()
@@ -455,6 +567,109 @@ api.register("plan_drop", function(args)
   plans.drop(args.id)
   return {dropped = tostring(args.id)}
 end)
+
+---------------------------------------------------------------------------
+-- removals (planner v2 rebuilds)
+---------------------------------------------------------------------------
+
+-- the listed existing entity (same name, force, exact position, unit when given; never a ghost) or nil
+function plans.find_listed(surface, p, rm)
+  local force = game.forces[p.force]
+  if not (surface and force) then return nil end
+  for _, e in pairs(surface.find_entities_filtered{name = rm[1], position = {rm[2], rm[3]}, force = force}) do
+    if e.valid and e.type ~= "entity-ghost" and e.position.x == rm[2] and e.position.y == rm[3] and
+        (rm[4] == nil or e.unit_number == rm[4]) then
+      return e
+    end
+  end
+  return nil
+end
+
+function plans.removal_counts(p)
+  local rs = p.rm or {}
+  local pending = 0
+  for _ in pairs(p.removing or {}) do pending = pending + 1 end
+  return {listed = #(p.removes or {}), marked = rs.marked or 0, removed = rs.removed or 0, changed = rs.changed or 0,
+    cancelled = rs.cancelled or 0, kept = rs.kept or 0, pending = pending, deferred = #(p.deferred or {})}
+end
+
+-- order deconstruction of exactly the listed entities
+local function mark_removals(p, surface, force)
+  p.removing, p.deferred = p.removing or {}, p.deferred or {}
+  p.rm = p.rm or {marked = 0, removed = 0, changed = 0, cancelled = 0, kept = 0}
+  for _, rm in ipairs(p.removes or {}) do
+    local e = plans.find_listed(surface, p, rm)
+    if e and e.unit_number and (e.to_be_deconstructed() or e.order_deconstruction(force)) then
+      p.removing[e.unit_number] = {name = rm[1], x = rm[2], y = rm[3], entity = e}
+      p.rm.marked = p.rm.marked + 1
+    else
+      p.rm.changed = p.rm.changed + 1
+    end
+  end
+end
+
+-- a listed entity of this plan is still standing inside tile box b
+local function removing_in(p, surface, b)
+  if not p.removing or next(p.removing) == nil then return false end
+  for _, f in pairs(surface.find_entities_filtered{area = {{b[1] + 0.1, b[2] + 0.1}, {b[3] - 0.1, b[4] - 0.1}}}) do
+    if f.valid and f.unit_number and p.removing[f.unit_number] then return true end
+  end
+  return false
+end
+
+-- cancel every mark this plan still has; deferred ghosts are dropped (nothing else is touched). -> marks cancelled
+function plans.cancel_removal(p)
+  local n = 0
+  local rows = p.removing or {}
+  p.removing = {}  -- first: the on_cancelled_deconstruction events below must not count these as "kept by you"
+  for _, row in pairs(rows) do
+    local e = row.entity
+    if e and e.valid and e.to_be_deconstructed() then
+      e.cancel_deconstruction(game.forces[p.force] or e.force)
+      n = n + 1
+    end
+  end
+  if p.rm then p.rm.cancelled = (p.rm.cancelled or 0) + n end
+  p.deferred = {}
+  return n
+end
+
+-- The plan's own poles (ghosts or built) are wired to each other explicitly: a ghost pole auto-connects to whatever is
+-- nearest, e.g. a ghost pole of the player's that the helper never builds, and the game skips the direct link when the
+-- two are already joined through it - the plan's line would then stay cut (verified on a real save). Every pair of
+-- plan poles within wire reach gets a copper wire. -> number of wires added.
+local function wire_poles(p, surface, force)
+  local poles = {}
+  for _, e in ipairs(p.entities) do
+    local proto = prototypes.entity[e[1]]
+    if proto and proto.type == "electric-pole" then
+      local f = surface.find_entities_filtered{position = {e[2], e[3]}, radius = 0.3, force = force, limit = 1,
+        name = e[1]}[1] or surface.find_entities_filtered{position = {e[2], e[3]}, radius = 0.3, force = force,
+        limit = 1, ghost_name = e[1]}[1]
+      if f then
+        local reach = 7.5
+        local okr, v = pcall(function() return proto.get_max_wire_distance() end)
+        if okr and type(v) == "number" then reach = v end
+        poles[#poles + 1] = {e = f, reach = reach}
+      end
+    end
+  end
+  local n = 0
+  for i = 1, #poles do
+    local a = poles[i]
+    for j = i + 1, #poles do
+      local b = poles[j]
+      local dx, dy = a.e.position.x - b.e.position.x, a.e.position.y - b.e.position.y
+      if dx * dx + dy * dy <= math.min(a.reach, b.reach) ^ 2 + 1e-6 then
+        local ca = a.e.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+        local cb = b.e.get_wire_connector(defines.wire_connector_id.pole_copper, true)
+        if ca and cb and not ca.is_connected_to(cb) and ca.connect_to(cb, false) then n = n + 1 end
+      end
+    end
+  end
+  return n
+end
+
 
 -- Place the plan's ghosts (tags.claude_plan = id, no last_user) and order deconstruction of listed obstacles plus
 -- trees/rocks under the ghosts placed. Blocked entities (other entities, water, cliffs, other ghosts) are skipped and
@@ -502,6 +717,10 @@ local function apply_step(p, n)
       end
       if existing then
         r.existing = r.existing + 1
+      elseif removing_in(p, surface, b) and not surface.can_place_entity{name = name, position = pos, direction = dir,
+          force = force, forced = true, build_check_type = defines.build_check_type.manual_ghost} then
+        p.deferred[#p.deferred + 1] = e   -- placed once the listed entity under it is gone
+        r.deferred = (r.deferred or 0) + 1
       elseif ghost then
         blocked(e, "ghost of " .. ghost .. " already there")
       elseif cliff then
@@ -538,6 +757,8 @@ local function apply_step(p, n)
   job.i = last + 1
   if job.i <= #p.entities then return false end
   -- done
+  local okw, nw = pcall(wire_poles, p, surface, force)
+  if okw then r.wired = nw else r.wire_error = tostring(nw):sub(1, 120) end
   p.apply = nil
   r.pending = nil
   r.tick = game.tick
@@ -577,7 +798,13 @@ function plans.apply(id)
   if not force then error("force " .. tostring(p.force) .. " is gone") end
   if p.apply then return p.result end  -- already running
   local prof = helpers.create_profiler()
-  local r = {placed = 0, existing = 0, blocked = 0, unknown = 0, deconstruct = 0, blocked_list = {}, total = #p.entities}
+  local r = {placed = 0, existing = 0, blocked = 0, unknown = 0, deconstruct = 0, blocked_list = {}, total = #p.entities,
+    deferred = 0}
+  -- the listed existing builds first (exactly those; anything that changed since planning is skipped and counted)
+  if p.removes and #p.removes > 0 then
+    mark_removals(p, surface, force)
+    r.removes = plans.removal_counts(p)
+  end
   -- listed obstacles (trees/rocks/... the planner wants gone); cliffs, resources and characters are never ordered
   -- Only neutral trees/rocks: never the player's buildings or ghosts, even for a row without a name.
   for _, d in ipairs(p.deconstruct) do
@@ -628,6 +855,18 @@ end)
 -- pending draw/apply work: one slice per tick in total; no jobs -> return at once
 local events = require("scripts.events")
 events.on(defines.events.on_tick, function()
+  local dq = storage.plan_deferred
+  if dq then
+    storage.plan_deferred = nil
+    for id in pairs(dq) do
+      local p = storage.plans and storage.plans[id]
+      if p then
+        local ok, err = pcall(plans.place_deferred, p)
+        if not ok then log("claude-bridge place_deferred: " .. tostring(err)) end
+        changed()
+      end
+    end
+  end
   local jobs = storage.plan_jobs
   if not jobs then return end
   local id = next(jobs)
@@ -661,6 +900,104 @@ events.on(defines.events.on_tick, function()
   end
 end)
 
+-- ghosts deferred behind listed entities: place the ones whose ground is free now. -> placed count
+function plans.place_deferred(p)
+  if not p.deferred or #p.deferred == 0 then return 0 end
+  local surface, force = game.get_surface(p.surface), game.forces[p.force]
+  if not (surface and force) then return 0 end
+  local keep, n = {}, 0
+  for _, e in ipairs(p.deferred) do
+    local b = box_of(e)
+    if removing_in(p, surface, b) then
+      keep[#keep + 1] = e
+    else
+      local pos = {x = e[2], y = e[3]}
+      local ok = surface.can_place_entity{name = e[1], position = pos, direction = e[4], force = force, forced = true,
+        build_check_type = defines.build_check_type.manual_ghost}
+      local ug = e[6] and (e[6].type == "input" or e[6].type == "output") and e[6].type or nil
+      local g = ok and surface.create_entity{name = "entity-ghost", inner_name = e[1], position = pos, direction = e[4],
+        force = force, tags = {claude_plan = p.id}, type = ug}
+      if g then
+        n = n + 1
+        if e[5] then pcall(g.set_recipe, e[5]) end
+      elseif p.result then
+        p.result.blocked = (p.result.blocked or 0) + 1
+      end
+    end
+  end
+  p.deferred = keep
+  if p.result then p.result.placed = (p.result.placed or 0) + n end
+  return n
+end
+
+-- a listed entity is gone (helper, player, robots, destroyed) or its mark was cancelled ("kept"): count it and place
+-- the ghosts that waited for it (kept: the ghosts overlapping it are dropped)
+function plans.removed(unit, how)
+  init()
+  for _, p in pairs(storage.plans) do
+    local row = p.removing and p.removing[unit]
+    if row then
+      p.removing[unit] = nil
+      p.rm = p.rm or {}
+      local e = row.entity
+      if how == "kept" then
+        p.rm.kept = (p.rm.kept or 0) + 1
+        if e and e.valid and p.deferred and #p.deferred > 0 then
+          local bb = e.bounding_box
+          local keep = {}
+          for _, d in ipairs(p.deferred) do
+            local b = box_of(d)
+            if not (b[1] < bb.right_bottom.x and bb.left_top.x < b[3] and b[2] < bb.right_bottom.y and
+                bb.left_top.y < b[4]) then
+              keep[#keep + 1] = d
+            end
+          end
+          p.deferred = keep
+        end
+      else
+        p.rm.removed = (p.rm.removed or 0) + 1
+        if e and e.valid then row.entity = nil end
+      end
+      if how ~= "kept" then
+        -- the entity is still valid while its event runs: place deferred ghosts on the next tick
+        storage.plan_deferred = storage.plan_deferred or {}
+        storage.plan_deferred[p.id] = true
+      end
+      changed()
+    end
+  end
+end
+api.plans_removed = plans.removed
+
+local function on_gone(ev)
+  local e = ev.entity
+  if e and e.valid and e.unit_number and storage.plans then
+    local ok, err = pcall(plans.removed, e.unit_number, "removed")
+    if not ok then log("claude-bridge plans removed: " .. tostring(err)) end
+  end
+end
+
+local ev_mod = require("scripts.events")
+for _, id in ipairs({defines.events.on_player_mined_entity, defines.events.on_robot_mined_entity,
+    defines.events.on_entity_died, defines.events.script_raised_destroy}) do
+  ev_mod.on(id, on_gone)
+end
+ev_mod.on(defines.events.on_cancelled_deconstruction, function(ev)
+  local e = ev.entity
+  if e and e.valid and e.unit_number and storage.plans then
+    local ok, err = pcall(plans.removed, e.unit_number, "kept")
+    if not ok then log("claude-bridge plans kept: " .. tostring(err)) end
+  end
+end)
+
+-- clear_claude_ghosts {plan}: its pending removals are cancelled too
+api.on_clear_plan = function(id)
+  init()
+  local p = storage.plans[tostring(id)]
+  if p then return plans.cancel_removal(p) end
+  return 0
+end
+
 -- this plan's ghosts are gone again: plans it replaced may be approved instead
 function plans.unsupersede(id)
   init()
@@ -670,24 +1007,36 @@ function plans.unsupersede(id)
   changed()
 end
 
--- positions {{x, y}, ...} of the entities a player (or the helper) fuels by hand: extra.fuel = "manual", boilers
-function plans.fuel_at(p)
+-- coal a hand-fed burner gets per fill (about 22 min for a burner drill or a stone furnace; the round tops a burner up
+-- once it is below half, so far sites are visited about every 10 minutes)
+local FILL = {["mining-drill"] = 50, furnace = 30, inserter = 5, boiler = 50}
+
+-- {{x, y, n}, ...} of the entities a player (or the helper) fuels by hand: extra.fuel = "manual", boilers; n = coal
+-- per fill (extra.fuel_n, else by type). In plan order (planner v2 lists its coal drills first, then each pair).
+function plans.fuel_at(p, existing_only)
   local out = {}
+  for _, r in ipairs(p.refuel_existing or {}) do out[#out + 1] = {r[2], r[3], r[5]} end  -- S0 repairs first
+  if existing_only then return out end
   for _, e in ipairs(p.entities) do
     local proto = prototypes.entity[e[1]]
-    if (e[6] and e[6].fuel == "manual") or (proto and proto.type == "boiler") then out[#out + 1] = {e[2], e[3]} end
+    if (e[6] and e[6].fuel == "manual") or (proto and proto.type == "boiler") then
+      local n = e[6] and tonumber(e[6].fuel_n) or (proto and FILL[proto.type]) or 10
+      out[#out + 1] = {e[2], e[3], n}
+    end
   end
+  for _, r in ipairs(p.keep_fuelled or {}) do out[#out + 1] = {r[1], r[2], r[3]} end  -- the previous stage's burners
   return out
 end
 
--- {id, what = "build"|"refuel", player?}: the helper builds the plan's ghosts (then fills its hand-fed burners) or
--- only refuels them; spawns the helper if needed (Plans tab buttons; tests). -> {msg}
+-- {id, what = "build"|"refuel"|"round", player?}: the helper builds the plan's ghosts (S0 fuel takes and listed
+-- removals first, then only this plan's ghosts, then its logistics round), only refuels the hand-fed burners once, or
+-- starts the round; spawns the helper if needed (Plans tab buttons; tests). -> {msg}
 api.register("plan_helper", function(args)
   local p = get(args.id)
-  local what = args.what == "refuel" and "refuel" or "build"
+  local what = (args.what == "refuel" or args.what == "round") and args.what or "build"
   if not p.bbox then error("plan has no entities") end
   local player = args.player and util.get_player(args) or nil
-  return {msg = agent.work_area(player, p.bbox, what, p.title, plans.fuel_at(p))}
+  return {msg = agent.work_area(player, p.bbox, what, p.title, plans.fuel_at(p), p.id)}
 end)
 
 -- one-line description of an apply result (GUI / chat)
@@ -697,6 +1046,11 @@ function plans.result_text(r)
   if r.existing > 0 then s = s .. ", " .. r.existing .. " already there" end
   if r.blocked > 0 then s = s .. ", " .. r.blocked .. " blocked (marked red)" end
   if r.deconstruct > 0 then s = s .. ", " .. r.deconstruct .. " tree(s)/rock(s) marked for removal" end
+  if r.removes then
+    s = s .. ", " .. r.removes.marked .. " of your entities marked to dismantle"
+    if r.removes.changed > 0 then s = s .. " (" .. r.removes.changed .. " had changed and stay)" end
+  end
+  if (r.deferred or 0) > 0 then s = s .. ", " .. r.deferred .. " ghost(s) wait for the dismantling" end
   if r.error then s = s .. ". Stopped early: " .. r.error end
   return s .. "."
 end

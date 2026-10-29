@@ -38,7 +38,7 @@ from .blocks import PE, Block, Port
 from .gamedata import DIR_VEC, rotate, tiles_of_box
 from .grid import BLOCKED, CLEARABLE, Grid
 from .plan import Plan, build_minutes, entity_counts, fmt_n, nice, raw_materials
-from .router import NoRoute, _is_electric, left, place_poles, right, route_belt, route_pipe
+from .router import NoRoute, _is_electric, left, place_poles, right, route_belt, route_pipe, underground_for
 from .validate import validate
 
 NORTH, EAST, SOUTH, WEST = 0, 4, 8, 12
@@ -320,6 +320,17 @@ def place_mine(grid: Grid, gd, patch, n: int, drill: str, belt: str, target, *, 
     return best[1] if best else None
 
 
+def site_weights(gd, drill, flows) -> dict:
+    """Hub site cost weight per resource (PLANNER-v2.md 6.1): priority p_r (iron 1.5, copper 1.0, coal 0.8,
+    stone 0.3) x lanes needed for its volume (one yellow lane = 450/min). Iron, the biggest flow, weighs most."""
+    from .cost import LANE_PER_MIN, PRIORITY
+    vol = {}
+    for f in flows:
+        _item, rate = B.mining_rate(gd, drill, f.resource)
+        vol[f.resource] = vol.get(f.resource, 0) + f.drills * rate * 60
+    return {r: PRIORITY.get(r, 0.5) * max(1, math.ceil(v / LANE_PER_MIN)) for r, v in vol.items()}
+
+
 # ---- hub ------------------------------------------------------------------------------------------------------
 @dataclass
 class Hub:
@@ -545,9 +556,7 @@ class Planner:
                 return None
             return ndimage.distance_transform_cdt(~mask, metric="taxicab").astype(float)
         dist = {res: dist_to(p.tiles) for res, p in patches.items()}
-        weight = {}
-        for f in flows:
-            weight[f.resource] = weight.get(f.resource, 0) + (2 if f.key[0] == "ore" else 1)
+        weight = site_weights(self.gd, self.drill, flows)
         dw = dist_to([water_tile]) if water_tile is not None else None
         m = self.v.margin
         cands = []
@@ -595,64 +604,7 @@ class Planner:
     def place_power(self, grid, center, boilers, engines):
         """(steam Block placed, offshore pump PE, pipe PEs) on the shore nearest `center`, or None. Occupies the
         tiles in `grid` on success."""
-        gd, w = self.gd, self.world
-        spots = []
-        for body in w.water_bodies(30):
-            for x, y, d in w.shoreline(body):
-                if grid.in_bounds(x, y):
-                    spots.append((_taxi((x, y), center), x, y, d))
-        spots.sort()
-        ok = _Sum(grid, grid.placeable_mask(allow_clear=True, avoid_resources=True))
-        blocks, tried = {}, 0
-        for _dist, x, y, d in spots:
-            if tried > 40:
-                break
-            pump = PE("offshore-pump", x + 0.5, y + 0.5, d)
-            foot = _tiles(gd, pump)
-            if not grid.can_place([t for t in foot if not grid.is_water(*t)]):
-                continue
-            conns = gd.fluid_connections("offshore-pump", pump.x, pump.y, d)
-            if not conns or grid.state_at(conns[0][0], conns[0][1]) == BLOCKED:
-                continue
-            tx, ty, dout = conns[0]
-            tried += 1
-            side = SIDE_OF[dout]
-            if side not in blocks:
-                blocks[side] = B.steam_power(boilers, engines, gd, water_side=side, pole=self.pole)
-            sb = blocks[side]
-            port = sb.port("pipe_in")
-            vx, vy = DIR_VEC[dout]
-            px, py = -vy, vx
-            fits = []
-            for gap in range(0, 5):
-                for lat in (0, 1, -1, 2, -2, 3, -3):
-                    ox = tx + vx * gap + px * lat - port.x
-                    oy = ty + vy * gap + py * lat - port.y
-                    if ok.count(np.array([ox]), np.array([oy]), (0, 0, *sb.size))[0] == sb.size[0] * sb.size[1]:
-                        fits.append((gap + abs(lat), ox, oy))
-            for _c, ox, oy in sorted(fits)[:3]:
-                placed = sb.at(ox, oy)
-                ents = placed.placed()
-                tiles = set()
-                for e in ents:
-                    tiles |= _tiles(gd, e)
-                if tiles & foot or not grid.can_place(tiles):
-                    continue
-                g = grid.copy()
-                _occupy(g, gd, ents, "power")
-                g.occupy(foot, _tag("power", pump))
-                p_in = next(q for q in placed.placed_ports() if q.kind == "pipe_in")
-                g.release([(tx, ty), (p_in.x, p_in.y)])
-                try:
-                    pipe = route_pipe(g, gd, Port("pipe_out", "water", tx, ty, dout), p_in, others=ents + [pump])
-                except NoRoute:
-                    continue
-                if len(pipe) > 12:
-                    continue
-                _occupy(g, gd, pipe, "power")
-                grid.__dict__.update(g.__dict__)
-                return placed, pump, pipe
-        return None
+        return place_power(self.world, self.gd, grid, center, boilers, engines, self.pole)
 
     # -- one attempt ---------------------------------------------------------------------------------------------
     def _mine(self, grid, f, target, layouts_list=(("pairs",),)):
@@ -689,6 +641,11 @@ class Planner:
     def _route(self, grid, start, goal, others, free=(), max_nodes=None, sideload=False):
         """Belt from port `start` to port `goal` (sideload: goal is a tile of an existing belt, which stays)."""
         grid.release([(start.x, start.y)] + ([] if sideload else [(goal.x, goal.y)]) + list(free))
+        ug = underground_for(self.gd, self.belt)
+        if ug and self.gd.can_build(ug[0]):  # undergrounds may cross what a flood fill calls a wall
+            ents = route_belt(grid, self.gd, start, goal, self.belt, others=others, max_nodes=max_nodes or MAX_NODES)
+            _occupy(grid, self.gd, ents, "route")
+            return ents
         # cheap reachability test first: a failing A* search explores everything it can reach
         labels, _n = ndimage.label(grid.state != BLOCKED)
 
@@ -886,7 +843,11 @@ class Planner:
         self.patches = self.pick_patches(all_flows)
         water_tile = None
         if power:
-            nw = w.nearest_water_tile(*self.near)
+            wts = site_weights(gd, self.drill, all_flows)
+            tot = sum(wts.get(r, 0) for r in self.patches) or 1
+            cx = sum(wts.get(r, 0) * p.center[0] for r, p in self.patches.items()) / tot
+            cy = sum(wts.get(r, 0) * p.center[1] for r, p in self.patches.items()) / tot
+            nw = w.nearest_water_tile(cx, cy)
             if nw is None:
                 raise PlanError("no water body (>= 30 tiles) in the exported area for steam power")
             water_tile = nw[0]
@@ -934,7 +895,8 @@ class Planner:
             ok_sites += got
         if not plans:
             raise PlanError(f"no valid {self.v.key} {self.stage} plan found", self.reasons)
-        return min(plans, key=lambda p: p.stats["belts"] + 0.3 * p.stats["clear"] + 0.1 * p.stats["entities"])
+        return min(plans, key=lambda p: p.stats["belts"] + 0.3 * p.stats["clear"] + 0.1 * p.stats["entities"] +
+                   2.0 * max(0, (p.stats.get("longest_run") or 0) - 100))
 
     def finish(self, base, grid, hub: Hub, hb: Block, flows, steam):
         gd = self.gd
@@ -1012,7 +974,11 @@ class Planner:
             "ports": [[p.kind, p.item, p.x, p.y, p.direction, p.lane] for p in hb.placed_ports()
                       if p.kind == "belt_out"],
             "assume_research": bool(needs),
+            "routes": [{"what": f"{f.key[0]} {nice(f.key[1])}", "kind": "ore" if f.key[0] == "ore" else "coal",
+                        "tiles": len(f.route)} for f in flows],
         }
+        stats["belt_tiles"] = belts
+        stats["longest_run"] = max((r["tiles"] for r in stats["routes"]), default=0)
         warnings = []
         if needs:
             warnings.append("needs research first: " + ", ".join(nice(n) for n in needs[:6]))
@@ -1074,6 +1040,68 @@ class Planner:
 
 
 # ---- public API -------------------------------------------------------------------------------------------------
+def place_power(w, gd, grid, center, boilers, engines, pole, feed="belt", max_tries=40, key=None):
+    """(steam Block placed, offshore pump PE, pipe PEs) on the shore nearest `center` (or lowest key(x, y)), or None.
+    Occupies the tiles in `grid` on success. feed: blocks.steam_power fuel feed ("belt" | "manual")."""
+    spots = []
+    for body in w.water_bodies(30):
+        for x, y, d in w.shoreline(body):
+            if grid.in_bounds(x, y):
+                spots.append((key(x, y) if key else _taxi((x, y), center), x, y, d))
+    spots.sort()
+    ok = _Sum(grid, grid.placeable_mask(allow_clear=True, avoid_resources=True))
+    blocks, tried = {}, 0
+    for _dist, x, y, d in spots:
+        if tried > max_tries:
+            break
+        pump = PE("offshore-pump", x + 0.5, y + 0.5, d)
+        foot = _tiles(gd, pump)
+        if not grid.can_place([t for t in foot if not grid.is_water(*t)]):
+            continue
+        conns = gd.fluid_connections("offshore-pump", pump.x, pump.y, d)
+        if not conns or grid.state_at(conns[0][0], conns[0][1]) == BLOCKED:
+            continue
+        tx, ty, dout = conns[0]
+        tried += 1
+        side = SIDE_OF[dout]
+        if side not in blocks:
+            blocks[side] = B.steam_power(boilers, engines, gd, water_side=side, pole=pole, feed=feed)
+        sb = blocks[side]
+        port = sb.port("pipe_in")
+        vx, vy = DIR_VEC[dout]
+        px, py = -vy, vx
+        fits = []
+        for gap in range(0, 5):
+            for lat in (0, 1, -1, 2, -2, 3, -3):
+                ox = tx + vx * gap + px * lat - port.x
+                oy = ty + vy * gap + py * lat - port.y
+                if ok.count(np.array([ox]), np.array([oy]), (0, 0, *sb.size))[0] == sb.size[0] * sb.size[1]:
+                    fits.append((gap + abs(lat), ox, oy))
+        for _c, ox, oy in sorted(fits)[:3]:
+            placed = sb.at(ox, oy)
+            ents = placed.placed()
+            tiles = set()
+            for e in ents:
+                tiles |= _tiles(gd, e)
+            if tiles & foot or not grid.can_place(tiles):
+                continue
+            g = grid.copy()
+            _occupy(g, gd, ents, "power")
+            g.occupy(foot, _tag("power", pump))
+            p_in = next(q for q in placed.placed_ports() if q.kind == "pipe_in")
+            g.release([(tx, ty), (p_in.x, p_in.y)])
+            try:
+                pipe = route_pipe(g, gd, Port("pipe_out", "water", tx, ty, dout), p_in, others=ents + [pump])
+            except NoRoute:
+                continue
+            if len(pipe) > 12:
+                continue
+            _occupy(g, gd, pipe, "power")
+            grid.__dict__.update(g.__dict__)
+            return placed, pump, pipe
+    return None
+
+
 def plan_starter_base(world, gd, goal=None, variant="compact", **kw) -> Plan:
     """One validated starter-base Plan (raises PlanError with .reasons when no configuration passes)."""
     return Planner(world, gd, goal, variant, **kw).run()

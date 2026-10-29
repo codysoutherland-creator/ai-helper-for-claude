@@ -40,15 +40,36 @@ enabled. `factorio_run_lua` needs RCON (config `"rcon": true`).
 ## Planner first (any build bigger than a few entities)
 
 Deterministic code does the layout; you pick, explain and orchestrate. Never hand-place a base.
-- Starter base / "set me up": `plan_starter_base(goal_text, variants=3[, stage="bootstrap"|"electric"])` — one call:
-  exports the map + game data, plans 2-3 validated variants (compact / balanced / expandable), shows them in the
-  Plans tab and returns compact summaries. Then tell the player in a few plain sentences how they differ (output/min,
-  size, materials, build time) and that they can Preview and Approve one in the Plans tab. Each plan's summary says
-  how long hand fuel lasts (bootstrap: burner drills ~22 min on 50 coal → Helper: refuel).
+- Starter base / "set me up": `plan_starter_base(goal_text, variants=3[, allow_removal=True])` — one call: exports
+  the map, reads what the player and the helper actually carry (and chests, machines, production, research), and
+  plans up to 4 validated variants, each a different build: **quick** (burner drills straight into furnaces on the
+  iron patch: iron plates in minutes, no belts; copper comes with its stage 2), **balanced** (iron + copper pairs on
+  their patches from the start), **rebuild** (only when taking apart or converting specific old builds scores clearly
+  better: it lists exactly what it removes and why - e.g. an idle drill line whose belt goes nowhere is turned into
+  pairs where it stands, only its belt removed; labs are never taken apart; the player's words "tidy up" / "reuse my
+  old stuff" lower that bar) and **longterm** (the central hub only where its belts are short; on a map with far-apart
+  patches "grow on site": twice the smelting on the patches - never a hub with 150+ tile ore belts). Every variant
+  carries a placed and checked **stage 2** (`stages[1]`, its own plan id): a hand-fed steam engine at the water, poles
+  to the player's idle labs (powered where they stand) or 2 new labs by the iron, copper pairs when stage 1 has none,
+  with its bill and when red science research can start (`eta.science_start`, `eta.automation`). Each plan returns
+  `eta` (minutes to first plates / full rate, from a model of what the helper really does: gathering, building site by
+  site, carrying coal), `bill` (needs / have / salvage / short, and `fuel`: coal to start the burners, what they burn
+  per minute, and where the coal comes from), belts (total, longest), `removes`, `gates` (quality warnings) and `card`
+  (the Plans tab text). In your reply give, per variant, the time to first plates, the bill against what they have,
+  how the coal keeps coming (the helper carries it from the coal drills: how far, how much of its time - and that the
+  burners stop if the helper is away for ~20 min), what it removes or takes coal out of (if anything), and its stage 2
+  (what, bill, when red science research can start); recommend one (`recommended`) and say why; be honest when a
+  variant is slow or keeps the helper busy. They Preview and Approve in the Plans tab; Approve starts the helper: it
+  takes the listed coal, dismantles the listed builds, builds only the plan's ghosts (never the player's own) and
+  then keeps the hand-fed burners fuelled from the plan's coal drills every few minutes until it gets another order
+  (`plan_helper(id, "round")` restarts that). When stage 1 runs and the player wants the next step, show its stage 2
+  with `plan_preview(<stages[1].id>)`; they approve it in the Plans tab (it is re-checked against the map then; its
+  coal round also keeps stage 1's burners going). Red science packs are hand-crafted (offer the helper:
+  factorio_agent_do craft + insert into the labs).
 - `world_summary` = patches, water, free areas in one call. `plan_preview(id)` re-shows one, `plan_validate(id)`
   re-checks it against the current map, `plan_list` lists them.
 - `plan_apply(id)` only when the player explicitly names the plan to build (normally they approve in the GUI).
-  `plan_helper(id, what="build"|"refuel")` = the free helper buttons of an approved plan.
+  `plan_helper(id, what="build"|"refuel"|"round")` = the free helper buttons of an approved plan.
 - Raw `factorio_place_ghosts` / `blueprint_place` refuse more than 50 ghosts unless `allow_large=True` (only if the
   player insists). Pass `plan="<short id>"` when placing a few ghosts by hand, so `factorio_clear_claude_ghosts` can
   remove them.

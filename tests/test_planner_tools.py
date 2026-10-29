@@ -43,14 +43,26 @@ def test_plan_starter_base_tool(tmp_path, monkeypatch):
     monkeypatch.setattr(server, "_world", fake_world)
     out = json.loads(server.plan_starter_base("start me off", variants=2))
     assert seen["at"] == (0.5, -2.5, "nauvis")  # planned around the player
-    assert [p["variant"] for p in out["plans"]] == ["compact", "balanced"]
+    # planner v2: "compact" became "quick" (alias kept in staged.ALIASES); the recommended plan comes first
+    assert sorted(p["variant"] for p in out["plans"]) == ["balanced", "quick"]
+    assert out["recommended"] == out["plans"][0]["id"]
+    assert out["state"]["source"] == "ops"  # this fake game has no base_state op: the older ops were used
+    for p in out["plans"]:
+        assert p["eta"]["first_plates"] is not None and p["bill"]["need"] and "card" in p
+        assert "First plates" in p["card"] and "Needs" in p["card"] and "Removes" in p["card"]
     previews = [a for op, a in game.calls if op == "plan_preview"]
     assert [a["show"] for a in previews] == [True, False]  # first one drawn, the other listed
     assert all(a["group"] == out["group"] and a["validation"]["ok"] for a in previews)
     for p in out["plans"]:
         assert (tmp_path / f"{p['id']}.json").exists()
-        assert "entities" in p and isinstance(p["entities"], int) and "summary" in p
-    assert len(json.dumps(out)) < 6000  # compact: no entity dumps
+        assert "entities" in p and isinstance(p["entities"], int) and "card" in p
+    # compact: no entity dumps (round 3: ~1.5 KB more per variant for its placed stage 2 - its bill, research, what
+    # it unlocks and when red science research can start - which Claude has to tell the player)
+    assert len(json.dumps(out)) < 9500
+    for p in out["plans"]:   # each variant's stage 2 is saved under its own id, ready for plan_preview later
+        s2 = next((s for s in p["stages"] if s.get("placed")), None)
+        if s2 is not None:
+            assert (tmp_path / f"{s2['id']}.json").exists()
     # re-preview from disk
     r = json.loads(server.plan_preview(out["plans"][0]["id"]))
     assert r["preview"]["entities"] == out["plans"][0]["entities"]
@@ -85,3 +97,6 @@ def test_companion_prompt_is_planner_first():
     s = companion.SYSTEM
     assert "plan_starter_base" in s and "Plans tab" in s and "never call plan_apply" in s
     assert "No markdown" in s
+    # planner v2: honest trade-offs per variant (first plates, bill vs stock, removals) and a recommendation
+    flat = " ".join(s.split())
+    assert "time to first plates" in flat and "takes apart" in flat and "recommend" in flat

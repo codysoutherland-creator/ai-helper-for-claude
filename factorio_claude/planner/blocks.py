@@ -506,6 +506,91 @@ def burner_mining_column(n=4, drill="burner-mining-drill", belt="transport-belt"
     return _finish(b.rotated(SIDES[output_side]), gd)
 
 
+# ---- on-site bootstrap (planner v2) ------------------------------------------------------------------------
+def burner_pair_row(n=4, gd=None, *, drill="burner-mining-drill", furnace="stone-furnace",
+                    inserter="burner-inserter", chest="wooden-chest", ore="iron-ore", output_side="north"):
+    """n burner drills on ore, each dropping straight into a stone furnace in front of it (direct insertion, no
+    belts); a burner inserter takes the plates out of each furnace into its own chest. Engine-verified as the
+    validator case drill_furnace_ok. Canonical (north): per unit i, columns 2i..2i+1: chest (2i, 0), inserter
+    (2i, 1), furnace rows 2-3, drill rows 4-5 (on the ore, facing north). Every burner is hand-fed (fuel=manual:
+    the helper's refuel covers them). info["drill_tiles"]: local tiles that must be ore."""
+    G = _geo(gd)
+    s = G.size(drill)[0]
+    fs = G.size(furnace)[0]
+    if s != 2 or fs != 2:
+        raise ValueError("burner_pair_row expects 2x2 drills and furnaces")
+    man = {"fuel": "manual"}
+    ents, drill_tiles = [], []
+    for i in range(n):
+        x = 2 * i
+        ents.append(_put(G, chest, x, 0))
+        ents.append(_put(G, inserter, x, 1, SOUTH, extra=dict(man)))
+        ents.append(_put(G, furnace, x, 2, extra=dict(man)))
+        d = _put(G, drill, x, 4, NORTH, extra=dict(man))
+        vx, vy = rotate(*G.entity(drill)["vector_to_place_result"], NORTH)
+        if not (x <= math.floor(d.x + vx) <= x + 1 and 2 <= math.floor(d.y + vy) <= 3):
+            raise ValueError(f"{drill} does not drop into the furnace in front of it")
+        ents.append(d)
+        drill_tiles += [(x + a, 4 + b) for a in range(2) for b in range(2)]
+    b = Block("burner_pair_row", ents, (2 * n, 6), [])
+    rec = smelt_recipe(G, ore, furnace)
+    _item, rate = mining_rate(G, drill, ore)
+    speed = G.entity(furnace).get("crafting_speed") or 1
+    crafts = min(rate / rec["in"], speed / rec["energy"])          # per unit, per s
+    b.rates = {rec["product"]: _per_min(crafts * rec["out"] * n),
+               "coal": -round(fuel_per_min(G, drill, "coal", n) + fuel_per_min(G, furnace, "coal", n) * min(
+                   1.0, crafts / (speed / rec["energy"])) + _ins_coal(G, inserter, crafts * rec["out"]) * n, 4)}
+    b.info = {"pairs": n, "ore": ore, "product": rec["product"], "drill_tiles": drill_tiles, "chest": chest}
+    b.notes.append(f"{n} burner pairs: {b.rates[rec['product']]}/min {rec['product']} into {n} chests; "
+                   "drills, furnaces and inserters are fuelled by hand")
+    return _finish(b.rotated(SIDES[output_side]), gd)
+
+
+def _ins_coal(G, inserter, items_per_s) -> float:
+    """Coal/min a burner inserter burns moving items_per_s (energy while swinging, ~busy fraction)."""
+    if not _burner(G, inserter):
+        return 0.0
+    try:
+        tp = G.inserter_throughput(inserter, stack=1) or 1
+    except KeyError:  # geometry-only data (no qualities): a burner inserter moves ~0.6 items/s
+        tp = 0.6
+    busy = min(1.0, items_per_s / tp)
+    return busy * fuel_per_min(G, inserter, "coal", 1)
+
+
+def drill_to_chest(n=2, gd=None, *, drill="burner-mining-drill", chest="wooden-chest", resource="coal",
+                   output_side="north"):
+    """n burner drills on `resource`, each dropping straight into its own chest (coal/stone gathering for the
+    bootstrap; no belts). Canonical (north): per unit i: chest (2i, 0), drill rows 1-2 facing north. Fuel by hand
+    (a coal drill's chest is where the helper refuels from)."""
+    G = _geo(gd)
+    s = G.size(drill)[0]
+    if s != 2:
+        raise ValueError("drill_to_chest expects 2x2 drills")
+    ents, drill_tiles = [], []
+    for i in range(n):
+        x = 2 * i
+        d = _put(G, drill, x, 1, NORTH, extra={"fuel": "manual"})
+        vx, vy = rotate(*G.entity(drill)["vector_to_place_result"], NORTH)
+        cx, cy = math.floor(d.x + vx), math.floor(d.y + vy)
+        if cy != 0 or not x <= cx <= x + 1:
+            raise ValueError(f"{drill} does not drop onto row 0")
+        ents.append(_put(G, chest, cx, 0))
+        ents.append(d)
+        drill_tiles += [(x + a, 1 + b) for a in range(2) for b in range(2)]
+    b = Block("drill_to_chest", ents, (2 * n, 3), [])
+    item, rate = mining_rate(G, drill, resource)
+    b.rates = {item: _per_min(rate * n)}
+    cpm = fuel_per_min(G, drill, "coal", n)
+    if item == "coal":
+        b.rates["coal"] = round(b.rates["coal"] - cpm, 4)
+    else:
+        b.rates["coal"] = -cpm
+    b.info = {"drills": n, "resource": resource, "item": item, "drill_tiles": drill_tiles, "chest": chest}
+    b.notes.append(f"{n} burner drills on {resource} into chests: {_per_min(rate * n)}/min gross")
+    return _finish(b.rotated(SIDES[output_side]), gd)
+
+
 # ---- smelting ----------------------------------------------------------------------------------------------
 def smelter_array(n, furnace=None, fuel_mode="mixed_lane", output_side="north", inserters=None, gd=None, *,
                   belt="transport-belt", pole=None, ore="iron-ore", fuel="coal", input_inserter=None):
@@ -588,12 +673,15 @@ def smelter_array(n, furnace=None, fuel_mode="mixed_lane", output_side="north", 
 
 # ---- power -------------------------------------------------------------------------------------------------
 def steam_power(boilers=1, engines=None, gd=None, *, boiler="boiler", engine="steam-engine",
-                inserter="burner-inserter", belt="transport-belt", pole=None, water_side="west", fuel="coal"):
+                inserter="burner-inserter", belt="transport-belt", pole=None, water_side="west", fuel="coal",
+                feed="belt"):
     """Boilers in a row (water chained through them) with up to 2 steam engines each, burner inserters feeding
     fuel from a belt behind them. Canonical (water_side="west"): water pipe_in at the west end of the boiler row,
     engines north, fuel belt along the south (fuel belt_in at its east end). Units are paired around a 1-tile
     gap column holding the poles (and a pipe joining the pair's water). The offshore pump is placed by the
-    placer at the pipe_in port: 1 pump : 20 boilers : 40 engines."""
+    placer at the pipe_in port: 1 pump : 20 boilers : 40 engines.
+    feed="manual" (planner v2 stage 2, a small plant for labs): no fuel belt and no inserters; the boilers are
+    fuelled by hand (extra fuel=manual, the helper's coal round keeps them filled)."""
     G = _geo(gd)
     engines = 2 * boilers if engines is None else engines
     if not boilers <= engines <= 2 * boilers:
@@ -605,21 +693,26 @@ def steam_power(boilers=1, engines=None, gd=None, *, boiler="boiler", engine="st
     top_e1 = eh if two else 0          # engine1 rows top_e1 .. top_e1+eh-1
     yb = top_e1 + eh                   # boiler top row
     yi, yc = yb + bh, yb + bh + 1      # inserter row, fuel belt row
+    if feed not in ("belt", "manual"):
+        raise ValueError(f"feed {feed!r}")
+    manual = feed == "manual"
     ents, poles, xs = [], [], []
     for i in range(boilers):
         x = (i // 2) * (2 * bw + 1) + (i % 2) * (bw + 1)
         xs.append(x)
-        ents.append(_put(G, boiler, x, yb, NORTH))
+        ents.append(_put(G, boiler, x, yb, NORTH, extra={"fuel": "manual"} if manual else None))
         ents.append(_put(G, engine, x, top_e1, NORTH))
         if i < engines - boilers:
             ents.append(_put(G, engine, x, 0, NORTH))
-        ents.append(_put(G, inserter, x + bw // 2, yi, SOUTH))
+        if not manual:
+            ents.append(_put(G, inserter, x + bw // 2, yi, SOUTH))
     w = xs[-1] + bw + (boilers % 2)  # a lone last unit keeps its gap column for the poles
     for i in range(0, boilers, 2):
         gx = xs[i] + bw
         if i + 1 < boilers:
             ents.append(_put(G, "pipe", gx, yb + bh - 1))
-    ents += [_put(G, belt, x, yc, WEST) for x in range(w)]
+    if not manual:
+        ents += [_put(G, belt, x, yc, WEST) for x in range(w)]
     gens = [e for e in ents if e.name == engine]
     cands = [(xs[i] + bw, y) for i in range(0, boilers, 2) for y in range(0, yb)]
     poles = _cover(G, pole, gens, cands)
@@ -627,9 +720,11 @@ def steam_power(boilers=1, engines=None, gd=None, *, boiler="boiler", engine="st
     # water input: the first boiler's west connection
     wc = [c for c in G.fluid_connections(boiler, ents[0].x, ents[0].y, NORTH) if c[2] == WEST][0]
     p0 = min(poles, key=lambda p: (p.y, p.x))
-    ports = [Port("pipe_in", "water", wc[0], wc[1], EAST), Port("belt_in", fuel, w, yc, WEST),
-             Port("pole", None, math.floor(p0.x), math.floor(p0.y), 0)]
-    b = Block("steam_power", ents, (w, yc + 1), ports)
+    ports = [Port("pipe_in", "water", wc[0], wc[1], EAST)]
+    if not manual:
+        ports.append(Port("belt_in", fuel, w, yc, WEST))
+    ports.append(Port("pole", None, math.floor(p0.x), math.floor(p0.y), 0))
+    b = Block("steam_power", ents, (w, yb + bh if manual else yc + 1), ports)
     e_kw = G.entity(engine).get("max_energy_production_kw") or 900
     b_kw = G.entity(boiler).get("max_energy_usage_kw") or 1800
     steam = boilers * min(b_kw, 2 * e_kw) / e_kw * (G.entity(engine).get("fluid_usage_per_s") or 30)
@@ -642,6 +737,20 @@ def steam_power(boilers=1, engines=None, gd=None, *, boiler="boiler", engine="st
     if boilers > 20:
         b.notes.append("more than 20 boilers on one water input: split into several blocks")
     return _finish(b.rotated({"west": 0, "north": 1, "east": 2, "south": 3}[water_side]), gd)
+
+
+def lab_row(n=2, gd=None, *, lab="lab", gap=1):
+    """n labs in a row, `gap` free tiles between them (poles are placed afterwards by router.place_poles, which
+    covers them and joins them to the power line). Science packs go in by hand (the player or the helper's insert
+    task): no inserters, no belts. rates["power_kw"] = the labs' draw."""
+    G = _geo(gd)
+    w, h = G.size(lab)
+    ents = [_put(G, lab, i * (w + gap), 0, extra={"input": "manual"}) for i in range(n)]
+    b = Block("lab_row", ents, (n * w + (n - 1) * gap, h), [])
+    b.rates = {"power_kw": round(n * (G.entity(lab).get("energy_usage_kw") or
+                                      G.entity(lab).get("max_energy_usage_kw") or 60), 1)}
+    b.info = {"labs": n}
+    return _finish(b, gd)
 
 
 # ---- logistics helpers -------------------------------------------------------------------------------------

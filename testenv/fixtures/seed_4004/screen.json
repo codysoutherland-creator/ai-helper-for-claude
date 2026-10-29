@@ -1,0 +1,72 @@
+{
+ "seed": 4004,
+ "area": [
+  -200,
+  -200,
+  200,
+  200
+ ],
+ "near_radius": 150,
+ "spawn": {
+  "y": 0,
+  "x": 0
+ },
+ "resources": {
+  "stone": {
+   "tiles": 481,
+   "amount": 384800,
+   "nearest": 183
+  },
+  "coal": {
+   "tiles": 796,
+   "amount": 716400,
+   "nearest": 73
+  },
+  "copper-ore": {
+   "tiles": 650,
+   "amount": 585000,
+   "nearest": 128
+  },
+  "iron-ore": {
+   "tiles": 1870,
+   "amount": 2057000,
+   "nearest": 150
+  }
+ },
+ "water_tiles": 728,
+ "water_nearest": 53,
+ "kind": "sprawl",
+ "layout": {
+  "patches": {
+   "iron-ore": [
+    128,
+    126,
+    25,
+    1100
+   ],
+   "copper-ore": [
+    -150,
+    8,
+    19,
+    900
+   ],
+   "coal": [
+    6,
+    -90,
+    16,
+    900
+   ],
+   "stone": [
+    -140,
+    -142,
+    13,
+    800
+   ]
+  },
+  "lake": [
+   49,
+   49,
+   15
+  ]
+ }
+}

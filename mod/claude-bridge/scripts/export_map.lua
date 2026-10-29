@@ -179,6 +179,7 @@ local function export_chunk(surface, force, cx, cy, inc)
             if ok then extra.ug = u end
           end
           extra.b = tile_box(e)
+          if e.unit_number then extra.unit = e.unit_number end
           ents[#ents + 1] = {name, p.x, p.y, e.direction, extra}
         end
       end

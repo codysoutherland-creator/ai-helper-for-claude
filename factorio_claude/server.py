@@ -28,8 +28,9 @@ The player has free in-game buttons/keywords for simple helper actions (factorio
 the mod's foreman watches the base for free (factorio_foreman_report). Start with `factorio_overview`. Use `factorio_map` to see layouts before building. Prefer ghosts/blueprints
 (robots or the user build them) or the agent character; `factorio_instant_build`/`factorio_agent_give` are cheats -
 only use them when the user asks. Agent tasks run asynchronously in-game: queue them, then poll `factorio_agent_status`.
-Builds bigger than a few entities go through the planner: `plan_starter_base` plans, verifies and shows 2-3 variants
-in the game's Plans tab; the player approves one there. Never hand-place large builds with ghost tools."""
+Builds bigger than a few entities go through the planner: `plan_starter_base` plans from the player's actual
+state, verifies and shows up to 4 variants (with time to first plates, bill vs inventory, and what each would take
+apart) in the game's Plans tab; the player approves one there. Never hand-place large builds with ghost tools."""
 
 mcp = MCPServer("factorio", instructions=INSTRUCTIONS)
 REGISTERED = []  # tool names registered in this process
@@ -431,44 +432,78 @@ def _jdump(o) -> str:
     return json.dumps(o, separators=(",", ":"), default=str)
 
 
+def _state(cx, cy, radius=PLAN_RADIUS):
+    """The player's actual state (inventories, chests, machines, production) for the planner; never fails."""
+    from .planner.state import BaseState
+    try:
+        return BaseState.from_link(call, cx, cy, radius)
+    except Exception:  # noqa: BLE001 - planning still works from a fresh-start assumption
+        return BaseState.fresh_start((cx, cy))
+
+
 @tool
 def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None = None, x: float | None = None,
-                      y: float | None = None) -> str:
-    """Plan a complete starter base near the player (or x,y): mines on iron/copper/stone/coal -> smelting hub ->
-    plate bus, coal feed, and steam power in the "electric" stage. The planner exports the map, places, routes and
-    VERIFIES everything (deterministic, free), then shows the variants in the game's Plans tab where the player
-    previews and approves one. stage: "bootstrap" (burner, buildable from nothing) | "electric" | omitted = what
-    research allows. goal_text: the player's words (e.g. "bigger", "electric"). variants: 1-3 (compact / balanced /
-    expandable). Returns compact summaries - explain the trade-offs in plain sentences and let the player pick."""
-    from .planner import placer
+                      y: float | None = None, allow_removal: bool = True) -> str:
+    """Plan a starter base from the player's ACTUAL state (inventories, chests, what is built, research) near the
+    player (or x,y). The planner exports the map, plans and VERIFIES (deterministic, free) up to 4 variants and shows
+    them in the game's Plans tab, where the player previews and approves one:
+    quick (burner drills straight into furnaces on the iron patch, iron plates soonest; copper with stage 2),
+    balanced (iron + copper pairs from the start), rebuild (only when taking apart or converting specific old builds of
+    the player scores clearly better; it lists exactly what it removes and why) and longterm (a central hub only where
+    its belts stay short, else twice the on-site smelting). variants: 1-4. Every variant also carries a placed, checked
+    stage 2 (stages[1]: power at the water + labs, its own plan id for plan_preview once stage 1 runs) with its bill and
+    when red science research can start. allow_removal=False never proposes removing anything. stage: only for the
+    long-term hub ("bootstrap"|"electric"). Each plan comes with eta (minutes to first plates / full rate, modelled on
+    what the helper really does including carrying coal between the sites), bill (needs / have / salvage / short /
+    fuel), belts, removes, gates and card. In your reply, for EACH variant say the time to first plates, the bill
+    against what the player has, how the coal reaches the burners (the helper carries it: how busy that keeps it), what
+    (if anything) it removes or takes coal out of, and its stage 2 (what, when research can start); then recommend one
+    (`recommended`) and say why. Never approve or apply for the player."""
+    from .planner import placer, staged
     cx, cy, surface = _player_spot(x, y)
     t0 = time.monotonic()
     try:
         world, gd = _world(cx, cy, surface)
     except (LinkError, TimeoutError, OSError) as e:
         return f"ERROR: map export failed: {e}"
+    st = _state(cx, cy)
     goal = placer.parse_goal(goal_text)
     goal["near"] = (cx, cy)
     if stage:
         goal["stage"] = stage
-    names = placer.DEFAULT_VARIANTS[:max(1, min(3, int(variants or 3)))]
+    n = max(1, min(4, int(variants or 3)))
     try:
-        plans = placer.plan_variants(world, gd, goal, names)
-    except placer.PlanError as e:
-        return _jdump({"error": str(e), "why": e.reasons[-6:]})
+        plans = staged.plan_options(world, gd, st, goal, variants=n, allow_removal=allow_removal)
+    except Exception as e:  # noqa: BLE001 - v2 found nothing (e.g. no iron in range): the v1 hub planner
+        try:
+            plans = placer.plan_variants(world, gd, goal, placer.DEFAULT_VARIANTS[:min(3, n)])
+        except placer.PlanError as e2:
+            return _jdump({"error": str(e2), "why": [str(e)] + e2.reasons[-5:]})
     group = f"g{int(time.time()) % 100000}"
     out = []
     for i, p in enumerate(plans):
         p.save(PLANS)
+        nxt = getattr(p, "next_stage", None)
+        if nxt is not None:   # stage 2, placed and checked: saved now, shown when the player asks for it
+            nxt.save(PLANS)
         shown = _send_preview(p, group=group, show=(i == 0))
         b = p.brief()
+        if "eta" in b:  # v2: the card text replaces the v1 summary
+            b.pop("summary", None)
+            b["card"] = p.summary
         if "error" in shown:
             b["preview_error"] = shown["error"]
         out.append(b)
-    return _jdump({"plans": out, "seconds": round(time.monotonic() - t0, 1), "group": group,
-                   "skipped": plans[0].stats.get("skipped_variants") or [],
-                   "next": "The player compares them in the Plans tab (Preview / Approve / Reject). Do not call "
-                           "plan_apply unless the player explicitly tells you which plan to build."})
+    rec = next((p.id for p in plans if p.stats.get("recommended")), plans[0].id)
+    return _jdump({"plans": out, "recommended": rec, "state": st.brief(),
+                   "seconds": round(time.monotonic() - t0, 1), "group": group,
+                   "next": "Tell the player, per variant: time to first plates, what it needs vs what they have, "
+                           "how the coal reaches the burners (the helper carries it), what it removes (if anything), "
+                           "its stage 2 (what, bill, when red science research can start) and the one-line "
+                           "trade-off; recommend one and why. They compare them in the Plans tab (Preview / Approve "
+                           "/ Reject). Stage 2 of the approved variant (stages[1].id) is shown with plan_preview "
+                           "when the player asks for it after stage 1 runs. Do not call plan_apply unless the player "
+                           "explicitly tells you which plan to build."})
 
 
 @tool
@@ -527,9 +562,12 @@ def plan_apply(plan_id: str) -> str:
 
 @tool
 def plan_helper(plan_id: str, what: str = "build") -> str:
-    """Free helper work on an approved plan (same as its Plans tab buttons): what="build" builds its ghosts (the helper
-    fetches/crafts/mines materials, then fills the hand-fed burners with coal); what="refuel" only tops up the hand-fed
-    burner drills/inserters (they run ~22 min on 50 coal). Spawns the helper if needed."""
+    """Free helper work on an approved plan (same as its Plans tab buttons): what="build" first takes the coal the plan
+    listed out of idle machines and takes apart the old builds it listed for removal (if any), then builds only this
+    plan's ghosts site by site (the helper fetches/crafts/mines materials and coal; never the player's own ghosts),
+    then runs the plan's coal round (tops up the hand-fed burners from the plan's coal chests every few minutes until
+    it gets another order); what="refuel" fills the hand-fed burners once; what="round" (re)starts the coal round.
+    Spawns the helper if needed."""
     try:
         return _jdump(call("plan_helper", id=plan_id, what=what))
     except LinkError as e:
@@ -549,8 +587,9 @@ def plan_list() -> str:
 @tool
 def world_summary(x: float | None = None, y: float | None = None, radius: int = 150) -> str:
     """Compact overview around the player (or x,y) from a fresh map export: nearest ore patches (amount, size,
-    center, distance), water bodies, existing buildings, and which planner stage research allows."""
-    from .planner import placer
+    center, distance), water bodies, existing buildings (grouped, with idle ones and why), what the player and the
+    helper carry, current production, and which planner stage research allows."""
+    from .planner import existing, placer
     cx, cy, surface = _player_spot(x, y)
     try:
         world, gd = _world(cx, cy, surface, radius)
@@ -567,9 +606,14 @@ def world_summary(x: float | None = None, y: float | None = None, radius: int = 
     for b in world.water_bodies(30)[:4]:
         water.append({"center": [round(b.center[0]), round(b.center[1])], "tiles": b.size})
     nw = world.nearest_water_tile(cx, cy)
+    st = _state(cx, cy, radius)
+    try:
+        built = existing.summarize(existing.clusters(world, gd, st), gd)
+    except Exception as e:  # noqa: BLE001
+        built = {"error": str(e)}
     return _jdump({"at": [round(cx), round(cy)], "surface": world.surface, "patches": patches, "water": water,
                    "nearest_water": list(nw[0]) if nw else None, "buildings": len(world.entities),
-                   "planner_stage": placer.default_stage(gd)})
+                   "existing": built, "state": st.brief(), "planner_stage": placer.default_stage(gd)})
 
 
 # ---------------------------------------------------------------- agent character

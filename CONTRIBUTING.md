@@ -91,9 +91,21 @@ In-engine checks (each on its own slot):
 - `testenv/security_test.py N [--no-debug]`: multiplayer rules, debug-op gating, deconstruct and UDP buffer caps
   (needs a save with a connected player).
 - `testenv/acceptance.py`: planner acceptance on the 3 fixture seeds (plan, apply, build, run at speed 10, compare
-  measured output with the plan). About an hour; `--variants 0 --stages bootstrap` for a quick run.
+  measured output with the plan). About an hour; `--variants 0 --stages bootstrap` for a quick run. `--no-cheat`:
+  player-like server, the real helper builds and fuels the plan from nothing, first plates measured against the ETA.
+- `tests/live_onsite.py --save <zip> --variant quick`: one planner v2 variant built by the real helper on a
+  `-NoDebugOps` server (Approve via `plan_apply`, then `plan_helper build`): first plates vs the ETA, plate rate,
+  burner fuel, player ghosts and the force's entities before/after.
 - `tests/live_*.py`: planner, router, validator, Plans tab (`live_planui.py --client` starts a graphical client).
-- `testenv/make_fixtures.py screen|build|readme`: rebuild `testenv/fixtures/` (planner unit-test inputs).
+- `tests/live_rebuild.py [--save seed_4004.zip]`: planner v2 rebuilds end to end (approve marks exactly the listed
+  entities, reject cancels the marks, the helper dismantles exactly them and keeps the salvage, player ghosts stay).
+- `tests/live_onsite.py ... --stage2-minutes M`: after stage 1, the variant's placed stage 2 is approved and built by
+  the helper (labs powered and researching, boiler and stage-1 burners fuelled, stage-1 rate held).
+- `tests/live_convert.py --save <zip>`: a planner v2 conversion (the player's idle drill line turned into pairs where
+  it stands) built by the helper: exactly the listed belts removed, the drills kept and producing.
+- `testenv/render_plan.py <map_dir> <out.png> --plan plan.json`: offline PNG of a map and plans (removals in red).
+- `testenv/make_fixtures.py screen|build|sprawl|readme`: rebuild `testenv/fixtures/` (planner unit-test inputs; `sprawl 4004` = the
+  synthetic planner-v2 map with far-apart ore and old builds in the middle).
 
 Companion test overrides: `FACTORIO_COMPANION_LOCK_PORT`, `FACTORIO_GAME_MATCH`, `FACTORIO_EXIT_AFTER`,
 `FACTORIO_CHAT_DIR`, `FACTORIO_PLANS_DIR`, `FACTORIO_FAKE_CLAUDE`, `--no-exit-check`.
@@ -110,6 +122,27 @@ Checked in this engine; please don't "fix" code that relies on them:
 - The first `/sc` command over RCON after start is swallowed; send a throwaway one first.
 - Headless servers need `auto_pause: false` in the server settings, or nothing runs without a player.
 - UDP datagrams above ~4 KB may be dropped, so everything is chunked.
+- `can_place_entity{build_check_type = manual_ghost}` accepts a ghost over an entity of the force that is marked for
+  deconstruction (not over an unmarked one; `manual` refuses both). Planner v2 rebuild plans therefore place their
+  replacement ghosts at once on approve; the deferred path in `plans.lua` only covers what the engine refuses.
+- Burner pair (burner drill dropping straight into a stone furnace, burner inserter into a chest): 14-15 plates/min
+  per pair; a burner drill into a chest: 15 coal or stone/min (`tests/live_validator.py v2_*`).
+- Reviving a ghost under a standing character fails (`revive()` returns nil): the helper steps off the ghost first.
+- A tree whose position is just outside a ghost's tiles can still block it with its collision box: the helper clears
+  trees whose box overlaps the ghost, not only those standing on its tiles.
+- A small steam plant needs no fuel belt: one hand-fed boiler and 1-2 steam engines power a few labs; the helper's
+  coal round keeps the boiler filled (`tests/live_onsite.py --stage2-minutes`).
+- A burner drill whose output tile is still a ghost drops one ore on the ground and waits; a furnace can still be
+  built there afterwards (the item does not block it). The helper's refuel skips such drills until their furnace or
+  chest is built (`tests/live_convert.py`).
+- Research triggers: furnace output counts (stage-1 pairs unlock steam power and electronics by themselves), but a lab
+  crafted by the helper (a character without a player) does not trigger red science; the player has to craft one.
+- A script-placed pole ghost auto-connects to whatever pole or pole ghost is nearest, including a player's ghost the
+  helper never builds, and skips the direct link to a pole it already reaches through that ghost: a planned line can
+  stay cut. `plans.lua` therefore wires every pair of the plan's poles within reach explicitly after applying.
+- Planner v2 ETA model vs the real helper (`tests/live_onsite.py`, `acceptance.py --no-cheat`, no debug ops): first
+  plates 1.52 min measured vs 1.5 predicted on a real-save copy (quick start, 60 plates/min held), 8.2-14.7 min vs
+  9.0-13.0 predicted from an empty inventory on the fixture seeds.
 
 ## Rules for changes
 

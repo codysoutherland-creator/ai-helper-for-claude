@@ -49,3 +49,18 @@ Spawn (0, 0); exported bbox (-224, -224, 224, 224), tick 62, 2294 obstacles, 0 f
 | stone | 1 | 173,525 | 237 / 173,525 / (-42, 2) / 34 |
 
 Water: 2164 tiles in 1 bodies (>=30 tiles); largest 2164 tiles; nearest body to spawn: 2164 tiles centered (70, 38), nearest tile 53 from spawn.
+
+## seed 4004 (sprawl, synthetic)
+
+Planner v2 regression map (`make_fixtures.py sprawl 4004`): natural ore and water removed around spawn, then iron ~180 tiles, copper ~150, coal ~90 and stone ~200 tiles from spawn in different directions, one lake ~70 tiles south-east, and old builds in the middle (an idle row of 14 stone furnaces fed by an 83-tile belt from nowhere, 8 burner drills off any ore, 2 unpowered labs, stray belts, a pole line). `state.json`: synthetic inventory (100 iron plates, 60 stone, 20 coal, 10 wood, 1 burner drill), machine status from the game, steam power researched. Not in `fixture_seeds()` (default kind "fresh"); use `fixture_seeds("sprawl")` / `load_state(4004)`.
+
+Spawn (0, 0); exported bbox (-224, -224, 224, 224), tick 147, 6052 obstacles, 155 force entities.
+
+| resource | patches | total amount | nearest patch: tiles / amount / center / closest tile to spawn |
+|---|---|---|---|
+| coal | 1 | 716,400 | 796 / 716,400 / (7, -90) / 74 |
+| copper-ore | 1 | 1,107,000 | 1230 / 1,107,000 / (-149, 9) / 129 |
+| iron-ore | 1 | 2,198,900 | 1999 / 2,198,900 / (128, 127) / 151 |
+| stone | 1 | 484,000 | 605 / 484,000 / (-140, -142) / 184 |
+
+Water: 728 tiles in 1 bodies (>=30 tiles); largest 728 tiles; nearest body to spawn: 728 tiles centered (49, 50), nearest tile 53 from spawn.

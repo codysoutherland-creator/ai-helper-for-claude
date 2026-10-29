@@ -1,4 +1,23 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.4.1
+Date: 2026-10-29
+  Features:
+    - Starter-base planner v2: plans from your actual state (inventories, chests, machines, production, research).
+    - Variants are different builds: Quick start (burner pairs on the iron patch, no belts), Balanced (iron and copper
+      on their patches), Long-term (hub only when its belts are short, otherwise grow on site) and Rebuild.
+    - Every plan card shows the bill (needs / have / salvage / short), ETA to first plates and full rate, plates/min,
+      belt length, footprint, a one-line trade-off and quality warnings.
+    - Rebuild variant: can take apart or convert specific old builds when that clearly pays off. It lists exactly
+      what it removes and why; the preview draws them in red.
+    - Approve marks exactly the listed entities for deconstruction; the helper dismantles them, keeps the items and
+      then builds. Reject or Dismiss cancels the marks that are left. Player ghosts are never touched.
+    - Each variant carries a checked stage 2 on the same footprint: steam power at the water, power for idle labs or
+      new labs, copper pairs.
+    - Helper: takes coal out of idle machines to start new burners, and keeps hand-fed burners fuelled from the
+      plan's coal drills (refuel round).
+  Changes:
+    - The planner no longer proposes a central hub with very long ore belts; long runs are flagged.
+---------------------------------------------------------------------------------------------------
 Version: 0.4.0
 Date: 2026-10-26
   Features:

@@ -4,6 +4,7 @@
   .venv\\Scripts\\python.exe testenv\\make_fixtures.py screen 1001 1002 ...   # resources + water within 150 of spawn
   .venv\\Scripts\\python.exe testenv\\make_fixtures.py build 1001 1002 ...    # export -> testenv/fixtures/seed_<n>/
   .venv\\Scripts\\python.exe testenv\\make_fixtures.py readme                 # rewrite testenv/fixtures/README.md
+  .venv\\Scripts\\python.exe testenv\\make_fixtures.py sprawl 4004            # synthetic planner-v2 map (SPRAWL)
 Options: --slot N (default 5), --name NAME (default fixtures). The instance is stopped at the end.
 """
 import json
@@ -127,6 +128,106 @@ def build(seed, name, slot):
     return ok
 
 
+# ---- seed 4004 "sprawl": synthetic map for planner v2 (ore far apart, lake off-centre, old builds in the middle) ----
+SPRAWL = {  # resource: (center x, center y, radius, amount per tile) - distances from spawn ~180/150/90/200
+    "iron-ore": (128, 126, 25, 1100), "copper-ore": (-150, 8, 19, 900), "coal": (6, -90, 16, 900),
+    "stone": (-140, -142, 13, 800)}
+LAKE = (49, 49, 15)        # off-centre lake, ~70 tiles from spawn (south-east)
+SPRAWL_STATE = {           # synthetic player state (no helper yet)
+    "player_pos": [0.5, 0.5], "player_inv": {"iron-plate": 100, "stone": 60, "coal": 20, "burner-mining-drill": 1,
+                                             "wood": 10},
+    "production": {}, "research_done": ["automation-science-pack", "electronics", "steam-power"], "source": "fixture"}
+
+SPRAWL_LUA = r"""
+local s, f = game.surfaces.nauvis, game.forces.player
+s.request_to_generate_chunks({0, 0}, 9) s.force_generate_chunk_requests()
+local A = {{-232, -232}, {232, 232}}
+for _, e in pairs(s.find_entities_filtered{area = A, type = "resource"}) do e.destroy() end
+-- no natural water near the build: land everywhere, then one lake
+local land = {}
+for _, t in pairs(s.find_tiles_filtered{area = A, collision_mask = "water_tile"}) do
+  land[#land + 1] = {name = "grass-1", position = t.position}
+end
+s.set_tiles(land, true, true, true, true)
+local P = %s
+local function disc(cx, cy, r, fn)
+  for y = cy - r - 2, cy + r + 2 do for x = cx - r - 2, cx + r + 2 do
+    local dx, dy = x - cx, y - cy
+    local wob = 1 + 0.12 * math.sin(x * 0.37) + 0.1 * math.cos(y * 0.29)
+    if dx * dx + dy * dy <= (r * wob) ^ 2 then fn(x, y) end
+  end end
+end
+for name, v in pairs(P) do
+  disc(v[1], v[2], v[3], function(x, y)
+    s.create_entity{name = name, position = {x + 0.5, y + 0.5}, amount = v[4]}
+  end)
+end
+local L = %s
+local water = {}
+disc(L[1], L[2], L[3], function(x, y) water[#water + 1] = {name = "water", position = {x, y}} end)
+s.set_tiles(water, true, true, true, true)
+-- research like a player who crafted a lab (trigger techs only)
+for _, t in pairs({"steam-power", "electronics", "automation-science-pack"}) do f.technologies[t].researched = true end
+-- old builds in the middle (clutter): an idle furnace row fed by a long belt from nowhere, burner drills off any ore,
+-- two unpowered labs, stray belts and a pole line
+local function mk(name, x, y, d) return s.create_entity{name = name, position = {x, y}, direction = d or 0, force = f} end
+local function clear(x0, y0, x1, y1)
+  for _, e in pairs(s.find_entities_filtered{area = {{x0, y0}, {x1, y1}}, type = {"tree", "simple-entity", "cliff"}}) do
+    e.destroy()
+  end
+end
+clear(-80, -20, 40, 40)
+for x = -75, 7 do mk("transport-belt", x + 0.5, -12.5, defines.direction.east) end
+for i = 0, 13 do
+  local x = -20 + 2 * i
+  mk("burner-inserter", x + 0.5, -11.5, defines.direction.north)
+  mk("stone-furnace", x + 1, -10)
+end
+for i = 0, 7 do mk("burner-mining-drill", 20 + 2 * i + 1, 11, defines.direction.north) end
+mk("lab", -29.5, 20.5) mk("lab", -25.5, 20.5)
+for x = -10, 3 do mk("transport-belt", x + 0.5, 24.5, defines.direction.west) end
+for y = -6, 4 do mk("transport-belt", 30.5, y + 0.5, defines.direction.south) end
+for i = 0, 8 do mk("small-electric-pole", -40.5 + 7 * i, 30.5) end
+rcon.print("ok")
+"""
+
+
+def _lua_table(d):
+    return "{" + ", ".join(f'["{k}"] = {{{", ".join(str(x) for x in v)}}}' for k, v in d.items()) + "}"
+
+
+def sprawl(seed, name, slot):
+    """Create seed_<seed>.zip, rewrite it into the sprawl map on a test slot, save, then build the fixture."""
+    create(seed)
+    restart(name, slot, f"seed_{seed}.zip")
+    connect(slot)
+    code = SPRAWL_LUA % (_lua_table(SPRAWL), "{" + ", ".join(str(v) for v in LAKE) + "}")
+    code = " ".join(ln for ln in code.splitlines() if not ln.strip().startswith("--"))  # one line, no comments
+    out = rcon.lua(code)
+    if "ok" not in out:
+        raise RuntimeError(out[:2000])
+    rcon.lua('game.server_save("sprawl_tmp")')
+    saved = TESTENV / "inst" / name / "write" / "saves" / "sprawl_tmp.zip"
+    for _ in range(60):
+        if saved.exists() and saved.stat().st_size > 0:
+            time.sleep(2)
+            break
+        time.sleep(0.5)
+    shutil.copy2(saved, TESTENV / "write" / f"seed_{seed}.zip")
+    build(seed, name, slot)
+    out_dir = FIXTURES / f"seed_{seed}"
+    sc = json.loads((out_dir / "screen.json").read_text())
+    sc["kind"] = "sprawl"
+    sc["layout"] = {"patches": SPRAWL, "lake": LAKE}
+    (out_dir / "screen.json").write_text(json.dumps(sc, indent=1))
+    # machines / chests as the game reports them (status, fuel); the inventories are the synthetic ones above
+    from factorio_claude.planner.state import BaseState
+    st = BaseState.from_dict(dict(rcon.bridge("base_state", x=0, y=0, radius=220), source="fixture"))
+    d = dict(SPRAWL_STATE, machines=st.machines, chests=st.chests, tick=st.tick)
+    (out_dir / "state.json").write_text(json.dumps(d, indent=1))
+    print(f"seed {seed}: sprawl fixture -> {out_dir}")
+
+
 def readme():
     """Summaries come from the fixtures themselves (loaded through the planner), so README matches the data."""
     from factorio_claude.planner.testing import load_fixture, fixture_seeds
@@ -139,11 +240,21 @@ def readme():
              "`world, gd = load_fixture(1001)` (cached, read-only; `cached=False` for a private copy).",
              "Start a live instance from the same map: `testenv/restart.ps1 -Name <name> -Slot <slot> -Save seed_<n>.zip`.",
              "Rebuild: `.venv\\Scripts\\python.exe testenv\\make_fixtures.py create|build <seeds>` then `readme`.", ""]
-    for seed in fixture_seeds():
+    for seed in fixture_seeds(None):
         world, gd = load_fixture(seed)
         sc = json.loads((FIXTURES / f"seed_{seed}" / "screen.json").read_text())
         sp = sc["spawn"]
-        lines += [f"## seed {seed}", "",
+        lines += [f"## seed {seed}" + (" (sprawl, synthetic)" if sc.get("kind") == "sprawl" else ""), ""]
+        if sc.get("kind") == "sprawl":
+            lines += ["Planner v2 regression map (`make_fixtures.py sprawl 4004`): natural ore and water removed around "
+                      "spawn, then iron ~180 tiles, copper ~150, coal ~90 and stone ~200 tiles from spawn in different "
+                      "directions, one lake ~70 tiles south-east, and old builds in the middle (an idle row of 14 stone "
+                      "furnaces fed by an 83-tile belt from nowhere, 8 burner drills off any ore, 2 unpowered labs, "
+                      "stray belts, a pole line). `state.json`: synthetic inventory (100 iron plates, 60 stone, 20 "
+                      "coal, 10 wood, 1 burner drill), machine status from the game, steam power researched. Not in "
+                      "`fixture_seeds()` (default kind \"fresh\"); use `fixture_seeds(\"sprawl\")` / `load_state(4004)`.",
+                      ""]
+        lines += [
                   f"Spawn ({sp['x']:g}, {sp['y']:g}); exported bbox {world.bbox}, tick {world.tick}, "
                   f"{len(world.obstacles)} obstacles, {len(world.entities)} force entities.", "",
                   "| resource | patches | total amount | nearest patch: tiles / amount / center / closest tile to spawn |",
@@ -189,8 +300,10 @@ def main(argv):
                 screen(seed, name, slot)
             elif cmd == "build":
                 build(seed, name, slot)
+            elif cmd == "sprawl":
+                sprawl(seed, name, slot)
     finally:
-        if cmd in ("screen", "build"):
+        if cmd in ("screen", "build", "sprawl"):
             restart(name, slot, stop=True)
 
 

@@ -233,17 +233,41 @@ events.on(defines.events.on_script_path_request_finished, function(e)
   end
 end)
 
+local LEG = 28          -- a long walk whose path request fails goes in legs of about this many tiles
+local MAX_LEGS = 40
+
+-- a reachable spot about LEG tiles from `from` toward `to` (straight on, else turning up to ~70 degrees), or nil
+local function leg_toward(c, from, to)
+  local d = dist(from, to)
+  local ux, uy = (to.x - from.x) / d, (to.y - from.y) / d
+  for _, ang in ipairs({0, 0.6, -0.6, 1.2, -1.2}) do
+    local vx, vy = ux * math.cos(ang) - uy * math.sin(ang), ux * math.sin(ang) + uy * math.cos(ang)
+    local p = {x = from.x + vx * LEG, y = from.y + vy * LEG}
+    local spot = c.surface.find_non_colliding_position("character", p, 8, 0.5)
+    if spot and dist(spot, from) > LEG / 2 then return spot end
+  end
+  return nil
+end
+
 -- returns "done", "running" or nil,err
 local function step_walk(a, t)
   local c = a.entity
-  local goal = {x = t.x, y = t.y}
+  local final = {x = t.x, y = t.y}
   local radius = t.radius or 0.6
-  if dist(c.position, goal) <= radius then
+  if dist(c.position, final) <= radius then
     c.walking_state = {walking = false}
     a.path_state = nil
     return "done"
   end
+  -- on the way to an intermediate leg point (the direct path request failed)
+  if t.via and dist(c.position, t.via) <= 2 then
+    t.via, t.last_pos, a.path_state = nil, nil, nil
+    return "running"
+  end
+  local goal = t.via or final
+  if t.via then radius = 2 end
   if not a.path_state or not t.last_pos then  -- new walk (also guards a stale path from a replaced task)
+    t.start_pos = t.start_pos or {x = c.position.x, y = c.position.y}
     request_path(a, goal, radius)
     t.stuck_checks = 0
     t.last_pos = c.position
@@ -256,6 +280,15 @@ local function step_walk(a, t)
     return "running"
   end
   local target
+  if a.path_state == "failed" and dist(c.position, final) > LEG * 1.5 and (t.legs or 0) < MAX_LEGS then
+    -- no path found for a long walk (the pathfinder gives up on long detours, e.g. around a lake): go in legs
+    local spot = leg_toward(c, c.position, final)
+    if spot then
+      t.legs = (t.legs or 0) + 1
+      t.via, t.last_pos, a.path_state = spot, nil, nil
+      return "running"
+    end
+  end
   if a.path_state == "failed" then
     -- no path found: try walking straight, the stuck check will give up eventually
     target = goal
@@ -271,10 +304,37 @@ local function step_walk(a, t)
   if game.tick - (t.last_check or 0) >= 60 then
     if dist(c.position, t.last_pos) < 0.2 then
       t.stuck_checks = (t.stuck_checks or 0) + 1
+      if t.stuck_checks >= 2 and not t.unstuck and t.start_pos and dist(c.position, t.start_pos) < 1 then
+        -- hasn't moved at all and no path leads out: boxed in by entities it built (or standing inside one). A
+        -- player would pick something up; the helper is moved to a free spot a few tiles toward its goal (once per
+        -- walk, logged)
+        t.unstuck = true
+        pcall(function()
+          local d = math.max(dist(c.position, goal), 0.01)
+          local ux, uy = (goal.x - c.position.x) / d, (goal.y - c.position.y) / d
+          for _, k in ipairs({4, 7, 10}) do
+            local spot = c.surface.find_non_colliding_position("character",
+              {x = c.position.x + ux * k, y = c.position.y + uy * k}, 3, 0.5)
+            if spot and dist(spot, c.position) >= 2 then
+              c.teleport(spot)
+              alog(a, "got out of a dead end at " .. round(t.start_pos.x, 0) .. "," .. round(t.start_pos.y, 0))
+              t.stuck_checks = 0
+              t.last_pos = c.position
+              request_path(a, goal, radius)
+              break
+            end
+          end
+        end)
+      end
       if t.stuck_checks >= 4 then
         c.walking_state = {walking = false}
         a.path_state = nil
-        return nil, "stuck walking to " .. round(goal.x) .. "," .. round(goal.y)
+        if t.via and (t.legs or 0) < MAX_LEGS then  -- that leg point can't be reached: try another one
+          t.via, t.last_pos, t.stuck_checks = nil, nil, 0
+          t.legs = (t.legs or 0) + 1
+          return "running"
+        end
+        return nil, "stuck walking to " .. round(final.x) .. "," .. round(final.y)
       end
       request_path(a, goal, radius)
     end
@@ -336,9 +396,15 @@ local function find_mine_target(a, t)
     if r <= max_r then
       f.radius = r
       local best, bestd
+      local function unreachable(p)  -- within 8 tiles of a tile the helper couldn't walk to
+        for _, s in ipairs(t.skip_at or {}) do
+          if math.abs(s.x - p.x) <= 8 and math.abs(s.y - p.y) <= 8 then return true end
+        end
+        return false
+      end
       for _, e in pairs(c.surface.find_entities_filtered(f)) do
         if e.minable and e.prototype.mineable_properties.minable and e.type ~= "character"
-            and not (t.skip and t.skip[e.position.x .. "," .. e.position.y]) then
+            and not (t.skip and t.skip[e.position.x .. "," .. e.position.y]) and not unreachable(e.position) then
           local d = dist(e.position, center)
           if not best or d < bestd then best, bestd = e, d end
         end
@@ -391,6 +457,8 @@ function tasks.mine(a, t)
         local amt = prod.amount or prod.amount_min or 1
         if (prod.probability or 1) >= math.random() then
           if c.insert{name = prod.name, count = amt} < amt then return nil, "inventory full" end
+          local st = a.stats
+          if st and st.mined then st.mined[prod.name] = (st.mined[prod.name] or 0) + amt end
         end
       end
     end
@@ -422,6 +490,25 @@ function tasks.craft(a, t)
   return "running"
 end
 
+-- a spot just outside box bb (a tile box) where the character fits, nearest first; nil if none
+function agent.free_spot_outside(c, bb)
+  local p = c.position
+  local cands = {}
+  for _, d in ipairs({1.2, 2.2, 3.2}) do
+    cands[#cands + 1] = {x = bb.left_top.x - d, y = p.y}
+    cands[#cands + 1] = {x = bb.right_bottom.x + d, y = p.y}
+    cands[#cands + 1] = {x = p.x, y = bb.left_top.y - d}
+    cands[#cands + 1] = {x = p.x, y = bb.right_bottom.y + d}
+  end
+  for _, q in ipairs(cands) do
+    if c.surface.can_place_entity{name = "character", position = q} and
+        c.surface.count_entities_filtered{type = "entity-ghost", position = q, radius = 0.45} == 0 then
+      return q
+    end
+  end
+  return nil
+end
+
 local function item_for(name)
   local proto = prototypes.entity[name]
   if not proto then error("unknown entity " .. tostring(name)) end
@@ -446,9 +533,26 @@ function tasks.place(a, t)
   if t.ghost_only and not ghost then return "done" end
   local built
   if ghost then
+    -- standing on the ghost itself? step off first (a revive there would build the entity around the character
+    -- and leave it stuck inside)
+    local bb, p = ghost.bounding_box, c.position
+    if not t.stepped and p.x > bb.left_top.x - 0.45 and p.x < bb.right_bottom.x + 0.45 and
+        p.y > bb.left_top.y - 0.45 and p.y < bb.right_bottom.y + 0.45 then
+      t.stepped = true
+      local spot = agent.free_spot_outside(c, bb)
+      if spot then
+        table.insert(a.queue, 1, t)
+        a.cur = {type = "walk", x = spot.x, y = spot.y, radius = 0.3, auto = true, soft = true}
+        a.path_state = nil
+        return "running"
+      end
+    end
     c.remove_item{name = item, count = 1}
     local _, e = ghost.revive{raise_revive = true}
-    if not e then c.insert{name = item, count = 1}; return nil, "ghost revive failed (blocked?)" end
+    if not e then
+      c.insert{name = item, count = 1}
+      return nil, "ghost revive failed (blocked?)"
+    end
     built = e
   else
     if not c.surface.can_place_entity{name = t.name, position = pos, direction = dir, force = c.force,
@@ -461,6 +565,18 @@ function tasks.place(a, t)
     c.remove_item{name = item, count = 1}
   end
   if t.recipe then pcall(function() built.set_recipe(t.recipe) end) end
+  -- start fuel (planner v2 plans: a few coal into each new burner when the helper carries some, so the first
+  -- machines run while it builds the rest; the plan's round tops them up afterwards)
+  -- (coal only: a slot holding wood would refuse the round's coal until the wood has burnt)
+  if t.fuel and t.fuel > 0 and built.valid and built.burner and c.get_item_count("coal") > 0 then
+    pcall(function()
+      local fi = built.get_fuel_inventory()
+      if fi and fi.can_insert{name = "coal", count = 1} then
+        local n = fi.insert{name = "coal", count = math.min(t.fuel, c.get_item_count("coal"))}
+        if n > 0 then c.remove_item{name = "coal", count = n} end
+      end
+    end)
+  end
   return "done"
 end
 
@@ -482,6 +598,7 @@ local function pick_fuel(c, fuel_inv)
   end
   return best
 end
+agent.pick_fuel = pick_fuel
 
 -- ---------- build ghosts, fetching/crafting the materials ----------
 
@@ -489,6 +606,8 @@ local ROUND_GHOSTS = 40    -- ghosts handled per round (bounds how much the help
 local SOURCE_RADIUS = 150  -- how far from the build site to look for chests / furnace output
 local WOOD_PER_TREE = 4
 local MINEABLE = {stone = true, coal = true, ["iron-ore"] = true, ["copper-ore"] = true}
+local MINE_RADIUS = 400   -- how far from the build site the material planner looks for ore to hand-mine (planner
+                          -- v2 plans span far-apart patches; agenda.MINE_RADIUS)
 -- gather order when materials are scarce: things that produce (drills, furnaces) before logistics
 local BUILD_RANK = {["mining-drill"] = 0, furnace = 0}
 
@@ -551,6 +670,16 @@ local function furnace_watts(proto)
   return (proto.get_max_energy_usage() or proto.energy_usage or 0) * 60
 end
 
+-- a plan's next stage keeps its ground (planner v2 `reserve` boxes): a 2x2 furnace centred at p (+1 tile) touches one?
+local function plan_reserved(p)
+  for _, pl in pairs(storage.plans or {}) do
+    for _, b in ipairs(pl.reserve or {}) do
+      if p.x + 2 > b[1] and p.x - 2 < b[3] and p.y + 2 > b[2] and p.y - 2 < b[4] then return true end
+    end
+  end
+  return false
+end
+
 -- Free ground for a new 2x2 furnace near `center`: not on ore, ghosts or anything else (1-tile margin
 -- so it never blocks a planned layout or its own access), away from spots already reserved.
 local function free_furnace_spot(c, center, reserved)
@@ -564,6 +693,7 @@ local function free_furnace_spot(c, center, reserved)
         for _, q in ipairs(reserved) do
           if math.abs(q.x - p.x) < 4 and math.abs(q.y - p.y) < 4 then ok = false; break end
         end
+        if ok and plan_reserved(p) then ok = false end
         if ok and s.can_place_entity{name = SMELTER, position = p, force = c.force,
             build_check_type = defines.build_check_type.manual}
             and s.count_entities_filtered{area = {{p.x - 2, p.y - 2}, {p.x + 2, p.y + 2}}, type = "character",
@@ -584,15 +714,32 @@ local FIRST_LOAD = 8  -- ore mined before a new smelter is started
 -- Plans how to get `item` x n into the helper: its own stock, chests/furnace output, the player's
 -- inventory, hand-crafting (recursively), smelting (in a nearby burner furnace or one it builds), or
 -- mining raw stone/coal/ore/wood. Records an undo log so a failed branch leaves nothing half-planned.
-local function new_planner(c, center, player)
+-- extra: {{x, y}, ...} chests that come first whatever their distance (a plan's coal chests for its fuel round).
+local function new_planner(c, center, player, extra)
   local P = {tasks = {}, missing = {}, undo = {}, summary = {}, miss_n = 0, smelters = {}, spots = {}, used_f = {}}
-  local avail, srcs = {}, {}
+  local avail, srcs, first, seen = {}, {}, {}, {}
+  for _, p in ipairs(extra or {}) do
+    local e = c.surface.find_entities_filtered{position = {x = p[1], y = p[2]}, radius = 0.6, force = c.force,
+      type = {"container", "logistic-container"}, limit = 1}[1]
+    local inv = e and target_inventory(e, true)
+    if inv and e.unit_number and not seen[e.unit_number] then
+      seen[e.unit_number] = true
+      first[#first + 1] = {e = e, inv = inv, left = {}}
+    end
+  end
   for _, e in pairs(c.surface.find_entities_filtered{position = center, radius = SOURCE_RADIUS,
       type = {"container", "logistic-container", "furnace"}, force = c.force}) do
     local inv = target_inventory(e, true)
-    if inv and not inv.is_empty() then srcs[#srcs + 1] = {e = e, inv = inv, left = {}} end
+    if inv and not inv.is_empty() and not (e.unit_number and seen[e.unit_number]) then
+      srcs[#srcs + 1] = {e = e, inv = inv, left = {}}
+    end
   end
   table.sort(srcs, function(s1, s2) return dist(s1.e.position, c.position) < dist(s2.e.position, c.position) end)
+  if #first > 0 then
+    table.sort(first, function(s1, s2) return dist(s1.e.position, c.position) < dist(s2.e.position, c.position) end)
+    for _, s in ipairs(srcs) do first[#first + 1] = s end
+    srcs = first
+  end
   local pinv = player and player.connected and player.character and player.get_main_inventory()
   local pleft = {}
 
@@ -684,8 +831,8 @@ local function new_planner(c, center, player)
       set(avail, item, avail[item] + trees * WOOD_PER_TREE - n)
       return true
     end
-    if MINEABLE[item] and P.resource_near(item) then
-      add({type = "mine", name = item, count = n, near = center, search_radius = 200}, "mine " .. n .. " " .. item)
+    if MINEABLE[item] and not P.no_mine and P.resource_near(item) then
+      add({type = "mine", name = item, count = n, near = center, search_radius = MINE_RADIUS}, "mine " .. n .. " " .. item)
       return true
     end
     P.missing[item] = (P.missing[item] or 0) + n
@@ -696,7 +843,7 @@ local function new_planner(c, center, player)
   local res_near = {}
   function P.resource_near(name)
     if res_near[name] == nil then
-      res_near[name] = c.surface.count_entities_filtered{position = center, radius = 200, name = name,
+      res_near[name] = c.surface.count_entities_filtered{position = center, radius = MINE_RADIUS, name = name,
         type = "resource", limit = 1} > 0
     end
     return res_near[name]
@@ -716,21 +863,34 @@ local function new_planner(c, center, player)
     return fuel_item
   end
 
-  -- a smelter for `ore`: an existing burner furnace of the force near the build site (idle or already on
-  -- this recipe), else a stone furnace the helper crafts and places on free ground
+  -- roughly the nearest tile of resource `name` to the build site (first hit of growing search radii), or nil
+  local function ore_near(name)
+    for _, r in ipairs({16, 32, 64, 128, 256, MINE_RADIUS}) do
+      local hit = c.surface.find_entities_filtered{position = center, radius = r, name = name, type = "resource",
+        limit = 1}[1]
+      if hit then return hit.position end
+    end
+    return nil
+  end
+
+  -- a smelter for `ore`: an existing burner furnace of the force next to the ore it mines (idle or already on this
+  -- recipe), else a stone furnace the helper crafts and places on free ground there
   local function new_smelter(r, ore, item, depth)
     local cat
     for _, k in ipairs(recipe_cats(r)) do if prototypes.entity[SMELTER].crafting_categories[k] then cat = k end end
     local S = {item = item, joules = 0, have_j = 0, fuel = pick_fuel_item()}
     local best, bestd
-    for _, e in pairs(c.surface.find_entities_filtered{position = center, radius = SOURCE_RADIUS, type = "furnace",
+    -- smelt next to the ore it mines (a plan's sites can be 200 tiles apart: no walking the ore to the build centre)
+    local site = (MINEABLE[ore] and ore_near(ore)) or center
+    local look = site ~= center and 24 or SOURCE_RADIUS
+    for _, e in pairs(c.surface.find_entities_filtered{position = site, radius = look, type = "furnace",
         force = c.force}) do
       local pr = e.prototype
       if pr.burner_prototype and pr.crafting_categories[cat] and not P.used_f[e.unit_number] then
         local src, out = e.get_inventory(FURNACE_IN), e.get_inventory(FURNACE_OUT)
-        if src and out and src.get_item_count(ore) == src.get_item_count()
+        if src and out and src.get_item_count(ore) == src.get_item_count() and not e.is_crafting()  -- not a running pair
             and out.get_item_count(item) == out.get_item_count() then
-          local d = dist(e.position, center)
+          local d = dist(e.position, site)
           if not best or d < bestd then best, bestd = e, d end
         end
       end
@@ -747,7 +907,7 @@ local function new_planner(c, center, player)
       S.have_j = S.have_j + (best.burner and best.burner.remaining_burning_fuel or 0)
       set(P.used_f, best.unit_number, true)
     else
-      local p = free_furnace_spot(c, center, P.spots)
+      local p = free_furnace_spot(c, site, P.spots) or (site ~= center and free_furnace_spot(c, center, P.spots))
       if not p then
         P.missing["free ground for a furnace"] = 1
         P.miss_n = P.miss_n + 1
@@ -908,17 +1068,51 @@ local function tell(a, msg)
   end
 end
 
--- {type="build_ghosts", x?, y?, radius=32, player?}: build every ghost in range. Each round builds what it
--- can carry (mining trees/rocks in the way first), otherwise plans + queues fetching/crafting/mining the
--- materials, then re-queues itself. Stops when no ghosts are left, after 3 rounds without progress (then reports
--- what's missing), or when 2 build rounds in a row leave every ghost standing (something blocks them).
+-- start fuel the helper puts into a new burner of an approved plan (when it carries fuel)
+local START_FUEL = {["mining-drill"] = 8, furnace = 5, inserter = 1, boiler = 5}  -- ~3.5 min of work
+
+-- a ghost of plan `plan` (tags.claude_plan); no plan = any ghost
+local function ghost_of_plan(g, plan)
+  if not plan then return true end
+  local ok, tags = pcall(function() return g.tags end)
+  return ok and type(tags) == "table" and tags.claude_plan == plan
+end
+agent.ghost_of_plan = ghost_of_plan
+
+-- {type="build_ghosts", x?, y?, radius=32, player?, plan?, fuel?}: build every ghost in range (plan = only the ghosts
+-- tagged with that plan id: an approved plan never builds the player's own ghosts or another plan's). Each round
+-- builds what it can carry (mining trees/rocks in the way first), otherwise plans + queues fetching/crafting/mining
+-- the materials, then re-queues itself. fuel = put a few coal into each new burner when the helper carries some.
+-- Stops when no ghosts are left, after 3 rounds without progress (then reports what's missing), or when 2 build
+-- rounds in a row leave every ghost standing (something blocks them).
 function tasks.build_ghosts(a, t)
   local c = a.entity
   local center = t.x and {x = t.x, y = t.y} or c.position
   local radius = t.radius or 32
   local ghosts = {}
   for _, g in pairs(c.surface.find_entities_filtered{position = center, radius = radius, type = "entity-ghost", force = c.force}) do
-    if g.quality.name == "normal" and place_item(g.ghost_name) then ghosts[#ghosts + 1] = g end
+    if g.quality.name == "normal" and place_item(g.ghost_name) and ghost_of_plan(g, t.plan) then
+      ghosts[#ghosts + 1] = g
+    end
+  end
+  -- order = {{x0, y0, x1, y1}, ...}: an approved plan's sites in its build order; this round only handles the first
+  -- site that still has ghosts (gather for it, build it, then the next one: the first machines run sooner)
+  local box_i, more_boxes = nil, false
+  if t.order and #ghosts > 0 then
+    local all = ghosts
+    for i, b in ipairs(t.order) do
+      if not (t.skip_boxes and t.skip_boxes[i]) then
+        local inside = {}
+        for _, g in ipairs(all) do
+          local p = g.position
+          if p.x >= b[1] and p.x <= b[3] and p.y >= b[2] and p.y <= b[4] then inside[#inside + 1] = g end
+        end
+        if #inside > 0 then
+          if box_i then more_boxes = true; break end
+          ghosts, box_i = inside, i
+        end
+      end
+    end
   end
   table.sort(ghosts, function(g1, g2) return dist(g1.position, c.position) < dist(g2.position, c.position) end)
   local built = t.built or 0
@@ -928,7 +1122,28 @@ function tasks.build_ghosts(a, t)
   end
 
   -- the last round tried to build some ghosts but none went away: they are blocked
+  -- moving on to the next site: first top up the burners already built (they ran on their start fuel meanwhile)
+  if box_i and t.cur_box and box_i ~= t.cur_box and t.fuel_at then
+    t.cur_box = box_i
+    t.tried, t.left, t.blocked = nil, nil, 0
+    table.insert(a.queue, 1, t)
+    table.insert(a.queue, 1, {type = "refuel", at = t.fuel_at, ordered = true, low_frac = 1 / 3,
+      coal_from = t.coal_from, player = t.player, quiet = true, soft = true})
+    t.requeued = true
+    return "done"
+  end
   local blocked = (t.tried and #ghosts >= (t.left or 0)) and (t.blocked or 0) + 1 or 0
+  if blocked >= 2 and box_i and more_boxes then
+    -- this site's last ghosts can't be placed: go on with the next site (they stay as ghosts)
+    local g = ghosts[1]
+    alog(a, "skipping " .. #ghosts .. " blocked ghost(s) near " .. round(g.position.x, 0) .. "," .. round(g.position.y, 0))
+    t.skip_boxes = t.skip_boxes or {}
+    t.skip_boxes[box_i] = true
+    t.tried, t.left, t.blocked = nil, nil, 0
+    table.insert(a.queue, 1, t)
+    t.requeued = true
+    return "done"
+  end
   if blocked >= 2 then
     local g = ghosts[1]
     local msg = "Built " .. built .. ". " .. #ghosts .. " ghost" .. (#ghosts == 1 and "" or "s") ..
@@ -939,7 +1154,10 @@ function tasks.build_ghosts(a, t)
     return "done"
   end
   local nxt = {type = "build_ghosts", x = center.x, y = center.y, radius = radius, player = t.player, built = built,
-    stall = t.stall or 0, left = #ghosts, blocked = blocked}
+    stall = t.stall or 0, left = #ghosts, blocked = blocked, plan = t.plan, fuel = t.fuel, coal_from = t.coal_from,
+    order = t.order, skip_boxes = t.skip_boxes, fuel_try = t.fuel_try, fuel_at = t.fuel_at, cur_box = box_i,
+    take_from = t.take_from}
+  local site_key = box_i or 0
   local sub, used, need, rank, cleared = {}, {}, {}, {}, {}
   for i = 1, math.min(#ghosts, ROUND_GHOSTS) do
     local g = ghosts[i]
@@ -951,18 +1169,24 @@ function tasks.build_ghosts(a, t)
         local r = g.get_recipe()
         recipe = r and r.name
       end
-      -- trees/rocks in its footprint block the build (nothing else removes them on a fresh map)
-      local bb = g.bounding_box
-      for _, o in pairs(c.surface.find_entities_filtered{area = {{bb.left_top.x + 0.05, bb.left_top.y + 0.05},
-          {bb.right_bottom.x - 0.05, bb.right_bottom.y - 0.05}}, type = {"tree", "simple-entity"}}) do
+      -- trees/rocks in its footprint block the build (nothing else removes them on a fresh map); a tree standing
+      -- just outside the tiles can still reach in with its collision box, so look a bit wider and test the boxes
+      local bb = g.bounding_box   -- exact collision boxes: a tree can reach in by a few hundredths of a tile
+      local x0, y0, x1, y1 = bb.left_top.x, bb.left_top.y, bb.right_bottom.x, bb.right_bottom.y
+      for _, o in pairs(c.surface.find_entities_filtered{area = {{x0 - 1, y0 - 1}, {x1 + 1, y1 + 1}},
+          type = {"tree", "simple-entity"}}) do
         local key = o.name .. "@" .. o.position.x .. "," .. o.position.y
-        if o.valid and o.minable and not cleared[key] then
+        local ob = o.valid and o.bounding_box
+        local touches = ob and ob.left_top.x < x1 and ob.right_bottom.x > x0 and ob.left_top.y < y1 and
+          ob.right_bottom.y > y0
+        if touches and o.minable and not cleared[key] then
           cleared[key] = true
           sub[#sub + 1] = {type = "mine", x = o.position.x, y = o.position.y, name = o.name, soft = true}
         end
       end
       sub[#sub + 1] = {type = "place", name = g.ghost_name, x = g.position.x, y = g.position.y,
-        direction = g.direction, recipe = recipe, soft = true, ghost_only = true}
+        direction = g.direction, recipe = recipe, soft = true, ghost_only = true,
+        fuel = t.fuel and START_FUEL[g.ghost_type] or nil}
     else
       need[item] = (need[item] or 0) + n
       rank[item] = math.min(rank[item] or 9, BUILD_RANK[g.ghost_type] or 1)
@@ -970,6 +1194,32 @@ function tasks.build_ghosts(a, t)
   end
 
   if #sub > 0 then
+    -- start fuel: right before placing a site's burners, get the coal they start on (the plan's coal chests first,
+    -- else mining); fetched now and not earlier, so the helper's own hand-smelting can't burn it first
+    if t.fuel and t.fuel_try ~= site_key then
+      nxt.fuel_try = site_key
+      local fneed = 0
+      for _, st in ipairs(sub) do
+        local proto = st.type == "place" and prototypes.entity[st.name]
+        if proto and proto.burner_prototype then fneed = fneed + (st.fuel or 0) end
+      end
+      local short = fneed - c.get_item_count("coal")
+      if short > 0 then
+        local pl = t.player and game.get_player(t.player)
+        if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
+          pl = nil
+        end
+        local P = new_planner(c, center, pl, t.coal_from)
+        if P.acquire("coal", short, 0) and #P.tasks > 0 then
+          local plan = P.ordered()
+          alog(a, "start fuel: " .. table.concat(P.summary, ", "))
+          nxt.left, nxt.tried, nxt.blocked = nil, nil, 0
+          plan[#plan + 1] = nxt
+          for i = #plan, 1, -1 do table.insert(a.queue, 1, plan[i]) end
+          return "done"
+        end
+      end
+    end
     local placing = 0
     for _, st in ipairs(sub) do if st.type == "place" then placing = placing + 1 end end
     nxt.built, nxt.stall, nxt.tried = built + placing, 0, placing
@@ -983,7 +1233,7 @@ function tasks.build_ghosts(a, t)
   if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
     player = nil
   end
-  local P = new_planner(c, center, player)
+  local P = new_planner(c, center, player, t.take_from)  -- a later stage: the previous stage's chests first
   local items = {}
   for item in pairs(need) do items[#items + 1] = item end
   -- scarce materials: production first (drills/furnaces), then the rest; stop when the haul won't fit
@@ -1129,17 +1379,25 @@ function tasks.insert(a, t)
   return "done"
 end
 
--- {type="take", x, y, item?, count?, name?}
+-- {type="take", x, y, item?, count?, name?, inv?, unit?}: inv = "fuel" takes from the fuel slots (a plan's S0 step:
+-- coal out of idle machines of the base, listed in the plan); unit = only that entity (unit_number)
 function tasks.take(a, t)
   local c = a.entity
   local e = entity_at(c.surface, {x = t.x, y = t.y, name = t.name})
   if not e then return nil, "nothing at " .. t.x .. "," .. t.y end
+  if t.unit and e.unit_number ~= t.unit then return nil, "not the listed " .. tostring(t.name) end
+  if t.inv == "fuel" and e.force ~= c.force then return nil, "not ours" end
   local near = ensure_near(a, t, e.position, c.reach_distance)
   if near == nil then return nil, "can't reach" end
   if not near then return "running" end
   c.walking_state = {walking = false}
-  local inv = target_inventory(e, true)
-  if not inv then return nil, e.name .. " has no output inventory" end
+  local inv
+  if t.inv == "fuel" then
+    inv = e.burner and e.get_fuel_inventory()
+  else
+    inv = target_inventory(e, true)
+  end
+  if not inv then return nil, e.name .. " has no " .. (t.inv == "fuel" and "fuel" or "output") .. " inventory" end
   local moved, limit = 0, t.count or math.huge
   for i = 1, #inv do
     local st = inv[i]
@@ -1203,14 +1461,65 @@ end
 local burner_types = {"furnace", "mining-drill", "inserter", "boiler", "assembling-machine", "burner-generator",
   "reactor", "lab", "car", "locomotive"}
 
-local MAX_FETCH_FUEL = 300  -- coal the helper gathers for one refuel run when it has none
+local MAX_FETCH_FUEL = 400  -- coal the helper gathers for one refuel run when it runs out
+local MAX_FETCHES = 3       -- coal fetch trips per refuel run
 
--- {type="refuel", x?, y?, radius=32, per=10, types?, at?, player?}: top up burner entities' fuel from the helper's
--- inventory, nearest first (at = {{x, y}, ...}: only the entities at these positions). With no fuel at all it first gathers coal (chests, the player's inventory when the
--- setting allows, or mining) and then runs again.
+local function fuel_count(e)
+  local fi = e.valid and e.burner and e.get_fuel_inventory()
+  return fi and fi.get_item_count() or 0
+end
+
+-- {type="refuel", x?, y?, radius=32, per=10, types?, at?, ordered?, low?, low_frac?, coal_from?, player?, quiet?}: top up
+-- burner entities' fuel from the helper's inventory. at = {{x, y, n?}, ...}: only the entities at these positions, n
+-- coal each (else per); otherwise every burner within radius. low = only entities holding fewer than low coal
+-- (default n); low_frac = the round's rule: go only when one of them is below that share of a fill, then top up all.
+-- ordered (an approved plan's list: coal drills first, then each pair):
+--   1. fetch: when the helper carries less than the starter amounts (a third of a fill each) it gets that much coal - the
+--      chests at coal_from (the plan's coal chests) first, then any chest or furnace output nearby, the player's
+--      inventory when the setting allows, or hand-mining (up to MAX_FETCHES trips); then, once, more coal for the full
+--      top-up, only from what is already mined (chests, the player);
+--   2. allocate what it carries: every burner its starter amount first (in list order), the rest tops them up in list
+--      order;
+--   3. deliver nearest first (one walk per site, not back and forth).
+-- Not ordered: nearest first, each up to n, fetching coal (mining allowed) when it runs out.
+local function refuel_fetch(a, t, need, mine, note)
+  local c = a.entity
+  local player = t.player and game.get_player(t.player)
+  if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
+    player = nil
+  end
+  local P = new_planner(c, c.position, player, t.coal_from)
+  P.no_mine = not mine or nil
+  if not P.acquire("coal", math.max(1, math.min(math.ceil(need), MAX_FETCH_FUEL)), 0) or #P.tasks == 0 then
+    return false
+  end
+  t.fetches = t.fetches + 1
+  t.approach = nil
+  local plan = P.ordered()
+  if not t.quiet then tell(a, "Getting coal to refuel: " .. table.concat(P.summary, ", ")) end
+  alog(a, "refuel: getting coal for " .. note .. " (" .. table.concat(P.summary, ", ") .. ")")
+  table.insert(a.queue, 1, t)
+  for i = #plan, 1, -1 do table.insert(a.queue, 1, plan[i]) end
+  t.requeued = true
+  return true
+end
+
+-- a drill of a plan (e.g. the player's own drill converted into a pair) whose drop target is still a ghost: fuelling it
+-- now would spill ore on the ground where the furnace goes; it is fuelled once its furnace/chest is built
+local function waits_for_ghost(e)
+  if e.type ~= "mining-drill" then return false end
+  local tgt = e.drop_target   -- a belt still there but marked for removal: the furnace replaces it, wait for that
+  if tgt and tgt.valid then return tgt.to_be_deconstructed() end
+  local ok, dp = pcall(function() return e.drop_position end)
+  if not ok or not dp then return false end
+  return e.surface.find_entities_filtered{area = {{dp.x - 0.1, dp.y - 0.1}, {dp.x + 0.1, dp.y + 0.1}},
+    type = "entity-ghost", force = e.force, limit = 1}[1] ~= nil
+end
+
 function tasks.refuel(a, t)
   local c = a.entity
   local per = t.per or 10
+  t.requeued = nil
   if not t.targets then
     local center = t.x and {x = t.x, y = t.y} or c.position
     t.targets = {}
@@ -1219,63 +1528,155 @@ function tasks.refuel(a, t)
       for _, p in ipairs(t.at) do
         local e = c.surface.find_entities_filtered{position = {x = p[1], y = p[2]}, force = c.force,
           type = burner_types, limit = 1}[1]
-        if e then found[#found + 1] = e end
+        if e and e.burner and not waits_for_ghost(e) then found[#found + 1] = {e = e, n = tonumber(p[3]) or per} end
       end
     else
-      found = c.surface.find_entities_filtered{position = center, radius = t.radius or 32,
-        type = t.types or burner_types, force = c.force}
+      for _, e in pairs(c.surface.find_entities_filtered{position = center, radius = t.radius or 32,
+          type = t.types or burner_types, force = c.force}) do
+        if e.burner then found[#found + 1] = {e = e, n = per} end
+      end
     end
-    for _, e in pairs(found) do
-      local fi = e.burner and e.get_fuel_inventory()
-      if fi and fi.get_item_count() < per then t.targets[#t.targets + 1] = e end
+    local any_low = false
+    for _, x in ipairs(found) do
+      local low = t.low or (t.low_frac and math.max(1, math.floor(x.n * t.low_frac))) or x.n
+      if fuel_count(x.e) < low then any_low = true end
     end
-    t.fueled = 0
-    if #t.targets == 0 then alog(a, "refuel: nothing needs fuel"); return "done" end
+    for _, x in ipairs(found) do
+      local low = t.low or (t.low_frac and math.max(1, math.floor(x.n * t.low_frac))) or x.n
+      local k = fuel_count(x.e)
+      local held = x.e.get_fuel_inventory().get_contents()[1]
+      -- a slot holding another fuel (e.g. wood) can't take coal: leave it until that burns out
+      if (not held or held.name == "coal") and (k < low or (t.low_frac and any_low and k < x.n)) then
+        t.targets[#t.targets + 1] = x
+      end
+    end
+    t.fueled, t.fetches = 0, t.fetches or 0
+    if #t.targets == 0 then
+      if not t.quiet then alog(a, "refuel: nothing needs fuel") end
+      return "done"
+    end
   end
-  -- nearest remaining target
-  local e, bi, bd
-  for i, x in ipairs(t.targets) do
-    if x.valid then
-      local d = dist(x.position, c.position)
-      if not bd or d < bd then e, bi, bd = x, i, d end
+  local function starter(r) return math.max(1, math.floor(r.n / 3)) end   -- covers a round period plus the trip
+
+  if t.ordered and not t.alloc then
+    -- 1. fetch
+    local carry = c.get_item_count("coal")
+    local s_need, f_need = 0, 0
+    for _, r in ipairs(t.targets) do
+      if r.e.valid then
+        local k = fuel_count(r.e)
+        s_need = s_need + math.max(0, starter(r) - k)
+        f_need = f_need + math.max(0, r.n - k)
+      end
+    end
+    if carry < s_need and t.fetches < MAX_FETCHES and refuel_fetch(a, t, s_need - carry, true, "the starter amounts") then
+      return "done"
+    end
+    if carry < f_need and not t.topped then
+      t.topped = true
+      if refuel_fetch(a, t, f_need - carry, false, "topping up") then return "done" end
+    end
+    -- 2. allocate
+    local left = carry
+    t.alloc = {}
+    for i, r in ipairs(t.targets) do
+      local give = r.e.valid and math.min(left, math.max(0, starter(r) - fuel_count(r.e))) or 0
+      t.alloc[i] = give
+      left = left - give
+    end
+    for i, r in ipairs(t.targets) do
+      if left <= 0 then break end
+      local give = r.e.valid and math.min(left, math.max(0, r.n - fuel_count(r.e) - t.alloc[i])) or 0
+      t.alloc[i] = t.alloc[i] + give
+      left = left - give
     end
   end
-  if not e then alog(a, "refuel: fueled " .. t.fueled); return "done" end
-  local fi = e.get_fuel_inventory()
-  local fuel = pick_fuel(c, fi)
-  if not fuel then
-    if t.fueled > 0 then alog(a, "refuel: out of fuel after " .. t.fueled); return "done" end
-    if t.fetched then return nil, "no fuel in inventory" end
-    -- gather coal for the rest, then refuel again
-    local need = 0
-    for _, x in ipairs(t.targets) do
-      if x.valid then need = need + math.max(0, per - x.get_fuel_inventory().get_item_count()) end
+
+  -- 3. deliver (ordered: the allocation, nearest first) / plain: nearest first up to n
+  local x, bi, bd
+  for i, r in ipairs(t.targets) do
+    local want = t.alloc and t.alloc[i] or (r.e.valid and (r.n - fuel_count(r.e)) or 0)
+    if r.e.valid and want > 0 then
+      local d = dist(r.e.position, c.position)
+      if not bd or d < bd then x, bi, bd = r, i, d end
     end
-    local player = t.player and game.get_player(t.player)
-    if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
-      player = nil
+  end
+  if not x then
+    if not t.quiet or t.fueled > 0 then
+      alog(a, "refuel: fueled " .. t.fueled .. (t.fetches > 0 and (" (" .. t.fetches .. " coal trips)") or ""))
     end
-    local P = new_planner(c, c.position, player)
-    if not P.acquire("coal", math.min(need, MAX_FETCH_FUEL), 0) or #P.tasks == 0 then
-      return nil, "no fuel in inventory (and no coal to fetch or mine nearby)"
-    end
-    local plan = P.ordered()
-    tell(a, "Getting coal to refuel: " .. table.concat(P.summary, ", "))
-    plan[#plan + 1] = {type = "refuel", x = t.x, y = t.y, radius = t.radius, per = per, types = t.types,
-      at = t.at, player = t.player, fetched = true}
-    for i = #plan, 1, -1 do table.insert(a.queue, 1, plan[i]) end
     return "done"
   end
+  local e = x.e
+  local fi = e.get_fuel_inventory()
+  -- a plan's round only ever puts coal in (wood would block the next coal delivery until it has burnt)
+  local fuel
+  if t.ordered then
+    fuel = c.get_item_count("coal") > 0 and fi.can_insert{name = "coal", count = 1} and "coal" or nil
+  else
+    fuel = pick_fuel(c, fi)
+  end
+  if not fuel then
+    if t.alloc then t.alloc[bi] = 0; return "running" end   -- allocated coal is gone (used elsewhere): skip it
+    if t.fetches >= MAX_FETCHES then
+      alog(a, "refuel: out of fuel after " .. t.fueled .. " (" .. t.fetches .. " coal trips)")
+      if t.fueled > 0 or t.quiet then return "done" end
+      return nil, "no fuel in inventory"
+    end
+    local need = 0
+    for _, r in ipairs(t.targets) do
+      if r.e.valid then need = need + math.max(0, r.n - fuel_count(r.e)) end
+    end
+    if refuel_fetch(a, t, need, true, "refuelling") then return "done" end
+    if t.fueled > 0 or t.quiet then
+      alog(a, "refuel: out of fuel after " .. t.fueled .. " (no coal to fetch or mine nearby)")
+      return "done"
+    end
+    return nil, "no fuel in inventory (and no coal to fetch or mine nearby)"
+  end
   local near = ensure_near(a, t, e.position, c.reach_distance)
-  if near == nil then table.remove(t.targets, bi); t.approach = nil; return "running" end
+  if near == nil then
+    if t.alloc then t.alloc[bi] = 0 else table.remove(t.targets, bi) end
+    t.approach = nil
+    return "running"
+  end
   if not near then return "running" end
   c.walking_state = {walking = false}
-  local want = math.min(per - fi.get_item_count(), c.get_item_count(fuel))
+  local want = t.alloc and t.alloc[bi] or (x.n - fi.get_item_count())
+  if t.alloc then  -- it burnt some since the allocation: at least its starter amount now, if the helper has it
+    want = math.max(want, starter(x) - fi.get_item_count())
+  end
+  want = math.min(want, c.get_item_count(fuel))
   local n = want > 0 and fi.insert{name = fuel, count = want} or 0
   if n > 0 then c.remove_item{name = fuel, count = n}; t.fueled = t.fueled + 1 end
-  table.remove(t.targets, bi)
+  if t.alloc then
+    t.alloc[bi] = 0
+  elseif n <= 0 then
+    table.remove(t.targets, bi)   -- full of another fuel: skip it
+  end
   t.approach = nil
   return "running"
+end
+
+local ROUND_PERIOD = 9000   -- ticks between two logistics rounds (2.5 min)
+
+-- {type="round", at, coal_from?, period?, player?, plan?}: the helper's logistics round for an on-site plan
+-- (PLANNER-v2.md 10.1): tops up the plan's hand-fed burners (at = {{x, y, n}}, in order; coal from the plan's coal
+-- chests first, else any chest nearby or mining), then waits `period` ticks and repeats. Any other order queued
+-- meanwhile ends it (it never blocks other work); Stop or a new quick action ends it too.
+function tasks.round(a, t)
+  if t.next_tick and game.tick < t.next_tick then
+    if #a.queue > 0 then alog(a, "round: stopped for new orders"); return "done" end
+    return "running"
+  end
+  t.cycles = (t.cycles or 0) + 1
+  if t.cycles == 1 and agent.round_started then agent.round_started(a) end
+  local nxt = {type = "round", at = t.at, coal_from = t.coal_from, period = t.period, player = t.player,
+    plan = t.plan, cycles = t.cycles, quiet = true, next_tick = game.tick + (t.period or ROUND_PERIOD)}
+  table.insert(a.queue, 1, nxt)
+  table.insert(a.queue, 1, {type = "refuel", at = t.at, ordered = true, coal_from = t.coal_from, player = t.player,
+    low_frac = 1 / 3, quiet = true, soft = true})
+  return "done"
 end
 
 -- {type="give_all", player?}: walk to the player and hand over everything
@@ -1301,6 +1702,55 @@ function tasks.give_all(a, t)
   return "done"
 end
 
+-- {type="dismantle", plan}: pick up exactly the entities an approved plan listed for removal (planner v2 rebuild):
+-- nearest first, only while they are still valid and marked for deconstruction. Items (and their contents) go into
+-- the helper's inventory; when it is full the rest spills next to it (reported). Ghosts that waited for the ground
+-- are placed as soon as each entity is gone.
+function tasks.dismantle(a, t)
+  local c = a.entity
+  local p = storage.plans and storage.plans[t.plan]
+  if not (p and p.removing) then return "done" end
+  local best, bd, bu
+  for unit, row in pairs(p.removing) do
+    local e = row.entity
+    if e and e.valid and e.to_be_deconstructed() and not row.skip then
+      local d = dist(e.position, c.position)
+      if not bd or d < bd then best, bd, bu = e, d, unit end
+    elseif not (e and e.valid) and api.plans_removed then
+      api.plans_removed(unit, "removed")
+    end
+  end
+  if not best then
+    alog(a, "dismantle: done (" .. (t.n or 0) .. " picked up)")
+    return "done"
+  end
+  if t.target ~= bu then t.target, t.timer, t.approach = bu, nil, nil end
+  local near = ensure_near(a, t, best.position, c.reach_distance - 0.5)
+  if near == nil then
+    -- unreachable: leave it marked (the player or robots may take it) and go on with the others
+    t.skip = (t.skip or 0) + 1
+    if t.skip > 20 then return nil, "can't reach the entities to dismantle" end
+    p.removing[bu].skip = true
+    return "running"
+  end
+  if not near then return "running" end
+  c.walking_state = {walking = false}
+  if not t.timer then t.timer = game.tick + mining_ticks(c, best) end
+  if game.tick < t.timer then return "running" end
+  t.timer = nil
+  local inv = c.get_main_inventory()
+  local name = best.name
+  local ok = best.valid and best.mine{inventory = inv, force = false}
+  if not ok and best.valid then
+    ok = best.mine{inventory = inv, force = true}  -- inventory full: what doesn't fit spills next to the helper
+    if ok and not t.spilled then t.spilled = true; alog(a, "dismantle: inventory full, items spilled") end
+  end
+  if not ok then return nil, "couldn't pick up " .. name end
+  t.n = (t.n or 0) + 1
+  if api.plans_removed then api.plans_removed(bu, "removed") end
+  return "running"
+end
+
 api.agent_tasks = tasks
 
 -- one-line feedback to whoever issued the last quick action (free)
@@ -1323,6 +1773,13 @@ local function notify_done(a)
   end
   notify(a, "Done: " .. what .. (extra and (" (" .. extra .. ")") or "") .. ".")
 end
+-- a plan's logistics round starts after its build: report the build as done (the round itself never ends)
+agent.round_started = function(a)
+  if a.notify_what then
+    notify_done(a)
+    notify(a, "I keep the plan's burners fuelled every few minutes (any new order stops that).")
+  end
+end
 
 local function tick()
   local a = storage.agent
@@ -1337,6 +1794,12 @@ local function tick()
     a.cur = table.remove(a.queue, 1)
   end
   local t = a.cur
+  -- helper work counters (planner v2 measures its gather rate from these): ticks busy / walking / mining
+  local stats = a.stats
+  if not stats then stats = {mined = {}, active_ticks = 0, mining_ticks = 0, walking_ticks = 0}; a.stats = stats end
+  stats.active_ticks = stats.active_ticks + 1
+  if t.type == "walk" then stats.walking_ticks = stats.walking_ticks + 1
+  elseif t.type == "mine" and t.timer then stats.mining_ticks = stats.mining_ticks + 1 end
   local handler = tasks[t.type]
   local ok, res, err
   if not handler then
@@ -1348,7 +1811,9 @@ local function tick()
   if res == "running" then return end
   if res == "done" then
     if a.cur == t then
-      if not t.auto then alog(a, "done: " .. t.type .. (t.name and (" " .. t.name) or "")) end
+      if not t.auto and not t.quiet and not t.requeued then
+        alog(a, "done: " .. t.type .. (t.name and (" " .. t.name) or ""))
+      end
       a.cur = nil
       if #a.queue == 0 then notify_done(a) end
     end
@@ -1360,7 +1825,22 @@ local function tick()
   if t.soft then
     alog(a, "skipped " .. t.type .. ": " .. tostring(err))
     if a.cur == t then a.cur = nil end
-    if t.auto and a.queue[1] and a.queue[1].soft then table.remove(a.queue, 1) end
+    local parent = a.queue[1]
+    if t.auto and t.type == "walk" and parent and parent.type == "mine" and not parent.x and
+        (parent.skipped or 0) < 5 then
+      -- couldn't walk to that ore tile (e.g. nests or water in the way): mine another tile of the same resource
+      local tg = parent.target
+      parent.skip = parent.skip or {}
+      parent.skip_at = parent.skip_at or {}
+      if tg and tg.valid then
+        parent.skip[tg.position.x .. "," .. tg.position.y] = true
+        parent.skip_at[#parent.skip_at + 1] = {x = tg.position.x, y = tg.position.y}  -- and its neighbourhood
+      end
+      parent.target, parent.timer, parent.approach = nil, nil, nil
+      parent.skipped = (parent.skipped or 0) + 1
+      return
+    end
+    if t.auto and parent and parent.soft then table.remove(a.queue, 1) end
     return
   end
   -- failure: halt the queue so Claude can re-plan
@@ -1396,7 +1876,7 @@ local needs_player = {give_all = true, take_hand = true}
 -- Helper builds everything in bbox {x0, y0, x1, y1} (spawning it if needed), then fills the hand-fed burners
 -- at positions `fuel_at` ({{x, y}, ...}: drills / inserters / boilers) with 50 coal. An endless follow (or an
 -- idle/halted queue) is replaced; other work stays first. what = "build" | "refuel". -> one-line message.
-function agent.work_area(player, bb, what, label, fuel_at)
+function agent.work_area(player, bb, what, label, fuel_at, plan_id)
   local cx, cy = (bb[1] + bb[3]) / 2, (bb[2] + bb[4]) / 2
   local radius = math.ceil(math.sqrt((bb[3] - bb[1]) ^ 2 + (bb[4] - bb[2]) ^ 2) / 2) + 4
   local pre = ""
@@ -1409,20 +1889,54 @@ function agent.work_area(player, bb, what, label, fuel_at)
   local pi = player and player.index
   if pi then a.notify = pi end
   local list = {}
-  if what == "build" then
-    list[#list + 1] = {type = "build_ghosts", x = cx, y = cy, radius = radius, player = pi}
+  local pl = plan_id and storage.plans and storage.plans[plan_id]
+  local coal_from = pl and pl.coal_from or nil
+  local dismantle = what == "build" and pl and pl.removing and next(pl.removing) ~= nil
+  -- S0 (planner v2): fuel out of the listed idle machines of the base first (exactly those, nothing else)
+  local took = 0
+  if what == "build" and pl and pl.takes and not pl.takes_done then
+    for _, tk in ipairs(pl.takes) do
+      list[#list + 1] = {type = "take", x = tk[2], y = tk[3], name = tk[1], unit = tk[4], item = tk[5], count = tk[6],
+        inv = "fuel", soft = true}
+      took = took + 1
+    end
+    pl.takes_done = true
   end
-  if fuel_at and #fuel_at > 0 then
-    list[#list + 1] = {type = "refuel", x = cx, y = cy, radius = radius, per = 50, player = pi, at = fuel_at}
-  elseif what == "refuel" then
+  if dismantle then
+    list[#list + 1] = {type = "dismantle", plan = plan_id}
+  end
+  -- S0 repairs: the listed existing burners get fuel before anything new is built
+  if what == "build" and pl and pl.refuel_existing and #pl.refuel_existing > 0 then
+    local at = {}
+    for _, r in ipairs(pl.refuel_existing) do at[#at + 1] = {r[2], r[3], r[5]} end
+    list[#list + 1] = {type = "refuel", at = at, ordered = true, coal_from = coal_from, player = pi, soft = true}
+  end
+  if what == "build" then
+    -- only this plan's ghosts (never the player's own or another plan's); a few coal into each new burner
+    list[#list + 1] = {type = "build_ghosts", x = cx, y = cy, radius = radius, player = pi, plan = plan_id,
+      fuel = plan_id and true or nil, coal_from = coal_from, order = pl and pl.build_order or nil,
+      fuel_at = (pl and pl.build_order and fuel_at and #fuel_at > 0) and fuel_at or nil,
+      take_from = pl and pl.take_from or nil}
+  end
+  local hand = fuel_at and #fuel_at > 0
+  if hand and plan_id and (what == "build" or what == "round") then
+    -- the plan's logistics round: keeps its hand-fed burners fuelled (coal from its coal chests) until a new order
+    list[#list + 1] = {type = "round", at = fuel_at, coal_from = coal_from, player = pi, plan = plan_id}
+  elseif hand then
+    list[#list + 1] = {type = "refuel", x = cx, y = cy, radius = radius, per = 50, player = pi, at = fuel_at,
+      ordered = plan_id and true or nil, coal_from = coal_from}
+  elseif what == "refuel" or what == "round" then
     return pre .. "Nothing in this plan is fuelled by hand."
   end
-  -- an endless follow never finishes: drop it; a halted queue is stale: replace it
-  local busy = a.cur and a.cur.type ~= "follow" and not a.halted
+  -- an endless follow or logistics round never finishes: drop it; a halted queue is stale: replace it
+  local endless = {follow = true, round = true}
+  local busy = a.cur and not endless[a.cur.type] and not (a.cur.quiet and a.cur.type == "refuel") and not a.halted
   local queue = {}
-  for _, q in ipairs(a.queue) do if q.type ~= "follow" then queue[#queue + 1] = q end end
+  for _, q in ipairs(a.queue) do
+    if not endless[q.type] and not (q.quiet and q.type == "refuel") then queue[#queue + 1] = q end
+  end
   if not a.halted and (busy or #queue > 0) then
-    if a.cur and a.cur.type == "follow" then
+    if a.cur and not busy then
       a.cur = nil
       a.entity.walking_state = {walking = false}
     end
@@ -1434,9 +1948,14 @@ function agent.work_area(player, bb, what, label, fuel_at)
   a.notify_what, a.notify_from = what == "build" and ("building " .. (label or "the plan")) or "refueling",
     a.log_n or 0
   if what == "build" then
-    return pre .. "The helper is building " .. (label or "it") .. ", fetching or crafting what it needs" ..
+    return pre .. "The helper is " .. (took > 0 and "taking the coal out of the listed idle machines, " or "") ..
+      (dismantle and "taking apart the listed old builds, then " or "") ..
+      "building " .. (label or "it") .. ", fetching or crafting what it needs" ..
       (busy and " after its current task" or "") ..
-      ((fuel_at and #fuel_at > 0) and ", then fills the hand-fed burners with coal." or ".")
+      (hand and ", then keeps the hand-fed burners fuelled with coal every few minutes." or ".")
+  end
+  if what == "round" then
+    return pre .. "The helper keeps the plan's hand-fed burners fuelled every few minutes (any new order stops it)."
   end
   return pre .. "The helper is topping up the hand-fed drills and inserters with coal" ..
     (busy and " after its current task" or "") .. "."
