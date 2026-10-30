@@ -40,9 +40,41 @@ enabled. `factorio_run_lua` needs RCON (config `"rcon": true`).
 ## Planner first (any build bigger than a few entities)
 
 Deterministic code does the layout; you pick, explain and orchestrate. Never hand-place a base.
-- Starter base / "set me up": `plan_starter_base(goal_text, variants=3[, allow_removal=True])` — one call: exports
-  the map, reads what the player and the helper actually carry (and chests, machines, production, research), and
-  plans up to 4 validated variants, each a different build: **quick** (burner drills straight into furnaces on the
+- Starter base / "set me up": `plan_starter_base(goal_text)` — one call: exports the map, reads what the player and
+  the helper actually carry (and chests, machines, production, research) and designs **master plans** (planner v3):
+  ONE finished starter base per variant — burner mining that becomes electric mining in the same slots, smelting
+  columns, steam power, automated red science and a green science block (cable -> circuit -> inserter, gear ->
+  belt, 6 green assemblers) with its labs — before anything is placed, then derives the stages from it: **S0**
+  burner iron + coal, **S1** burner copper, **S2** steam power + labs (every smelting-column inserter becomes
+  electric in place), **S3** automated red science (needs Automation), **S4** electric drills swapped into the burner
+  drills' slots + poles on the reserved gap rows (needs Electric mining drill), **S5** green science (needs Logistic
+  science pack + Logistics); a coal belt longer than 120 tiles is its own connector stage (**S0b**/**S1b**), and
+  until it is built the helper keeps that line's burners fuelled from a coal chest. Every stage only adds to the
+  same layout or swaps in place; it is checked in code (every stage validates, nothing built early stands where a
+  later stage builds). Variants: **hub** (furnaces and science in one block; each ore field sends its ore and coal
+  on ONE belt, and the coal belt out to the field keeps carrying the furnaces' coal after S4, so nothing is taken up)
+  and **onsite** (furnaces at each ore field, first plates soonest; one plate belt per metal to the science, split
+  for the green block at S5; the columns' far side keeps plate chests for building). Each master
+  returns `roadmap` rows (stage S0.., status done/now/ready/waiting, gate, bill need/short, eta {start, complete,
+  build} in minutes from now, places, removes, cuts, swaps, self_running, needs_helper), `end_state` (rates, power,
+  belts, chains, zones), `self_running_from`, `takes_apart` (the player's idle builds S0 takes apart, idle belt
+  tiles cut where new belts cross them), `card` and `now_plan` (the current stage, shown in the Plans tab). In your
+  reply **recommend one master** (`recommended`; the card's first line says why) and present it as a roadmap: what
+  the finished base makes, the current stage ("ready in" minutes, what it needs vs what they have), then one line per
+  later stage with roughly when it is done, its research gate and what it replaces in place; say from which stage the
+  base runs by itself and what the helper keeps fuelled before that; mention the other variant's trade-off in one
+  sentence. Say the `exceptions` entry plainly: Automation's 10 red packs are hand-made and put in a lab (no
+  assembler exists before it); every later pack comes from the assemblers. `science` says what the labs use per
+  research speed (10 labs at S3: 30 red/min on techs up to 20 s per unit, 20/min on 30 s ones; 16 at S5). Nothing of
+  the player's is taken apart by default (`allow_removal=false`): if `takes_apart.could_remove` or `could_take_coal`
+  is not zero, say what it would gain and re-plan with `allow_removal=true` only when they say yes.
+  Be honest when ore is far apart (`far_apart`). The player approves the current stage in the Plans tab; the later
+  stages wait there and the game offers each one by itself ("Stage ready: ...") when its research is done and the
+  stage before is built; `plan_next_stage(master)` re-checks and shows the next stage on demand and
+  `plan_roadmap(master)` re-reads the status of every stage. When no master plan fits the map (no water, ore out of
+  range) `plan_starter_base` falls back to planner v2, described next.
+- Planner v2 fallback: `plan_starter_base` returns `plans` instead of `masters`: up to 4 validated variants,
+  each a different build: **quick** (burner drills straight into furnaces on the
   iron patch: iron plates in minutes, no belts; copper comes with its stage 2), **balanced** (iron + copper pairs on
   their patches from the start), **rebuild** (only when taking apart or converting specific old builds scores clearly
   better: it lists exactly what it removes and why - e.g. an idle drill line whose belt goes nowhere is turned into

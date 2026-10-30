@@ -270,6 +270,122 @@ def render_sheet(world, out, plan, gd=None, scale=10, pad=6, cols=3, gap=6):
     return boxes
 
 
+STAGE_RGB = {0: (230, 70, 50), 1: (240, 150, 40), 2: (240, 230, 60), 3: (80, 220, 90), 4: (60, 210, 230),
+             5: (190, 110, 240)}
+ZONE_RGB = {"mine": (255, 170, 60), "coal": (150, 150, 150), "smelt": (255, 255, 255), "science": (200, 120, 255),
+            "power": (255, 70, 70), "mall": (120, 200, 255)}
+
+
+def _ex(e):
+    return e.extra if isinstance(e.extra, dict) else {}
+
+
+def master_window(master, gd, pad=12):
+    xs, ys = [], []
+    for z in master.zones:
+        xs += [z.rect[0], z.rect[2]]
+        ys += [z.rect[1], z.rect[3]]
+    for e in master.ents:
+        xs.append(e.x)
+        ys.append(e.y)
+    return (int(min(xs)) - pad, int(min(ys)) - pad, int(max(xs)) + pad, int(max(ys)) + pad)
+
+
+def draw_master(world, master, gd, stage=None, rect=None, scale=3):
+    """One panel. stage=None: the end state, every entity in its stage colour, zones outlined. stage=k: the base
+    after stage k (earlier stages grey, stage k in its colour, entities removed in k outlined yellow with an X),
+    zones of later stages as outlines (nothing placed there yet)."""
+    rect = rect or master_window(master, gd)
+    img, x0, y0 = draw(world, [], gd, rect, scale)
+    H, W = img.shape[0], img.shape[1]
+
+    def fill(b, c):
+        i0, i1 = max(int(math.floor(b[1] - y0)) * scale, 0), min(int(math.ceil(b[3] - y0)) * scale, H)
+        j0, j1 = max(int(math.floor(b[0] - x0)) * scale, 0), min(int(math.ceil(b[2] - x0)) * scale, W)
+        if i0 < i1 and j0 < j1:
+            img[i0:i1, j0:j1] = c
+    for z in master.zones:
+        if stage is None or z.first_stage > stage or True:
+            _outline(img, z.rect, x0, y0, scale, ZONE_RGB.get(z.kind, (255, 255, 255)))
+    removed = []
+    for e in master.ents:
+        x = _ex(e)
+        st, until = x.get("stage", 0), x.get("until")
+        b = _box(gd, e.name, e.x, e.y, e.direction)
+        if stage is None:
+            if until is not None:
+                continue           # the end state: swapped-out entities are gone
+            c = np.array(STAGE_RGB.get(st, (255, 255, 255)), float)
+            c = c * 0.6 + np.array(ent_color(e.name), float) * 0.4
+            fill(b, c.astype(np.uint8))
+            continue
+        if st > stage:
+            continue
+        if until is not None and until < stage:
+            continue
+        if until is not None and until == stage:
+            removed.append(b)
+            continue
+        if st == stage:
+            c = np.array(STAGE_RGB.get(st, (255, 255, 255)), float) * 0.55 + np.array(ent_color(e.name), float) * 0.45
+        else:
+            c = np.array(ent_color(e.name), float) * 0.35 + np.array((120, 120, 120)) * 0.65
+        fill(b, c.astype(np.uint8))
+    for b in removed:
+        _outline(img, b, x0, y0, scale, (255, 255, 0))
+        i0, j0 = int((b[1] - y0) * scale), int((b[0] - x0) * scale)
+        n = int((b[3] - b[1]) * scale)
+        for k in range(n):
+            for ii, jj in ((i0 + k, j0 + k), (i0 + k, j0 + n - 1 - k)):
+                if 0 <= ii < H and 0 <= jj < W:
+                    img[ii, jj] = (255, 255, 0)
+    label = "end" if stage is None else f"S{int(stage)}" + ("b" if stage != int(stage) else "")
+    _banner(img, label)
+    return img
+
+
+def _banner(img, label):
+    img[0:16, 0:60] = (0, 0, 0)
+    x = 4
+    for ch in label:
+        if ch == "S":
+            g = "111100111001111"
+        elif ch in ("e", "n", "d", "b"):
+            g = {"e": "111100111100111", "n": "110101101101101", "d": "110101101101110",
+                 "b": "100100111101111"}[ch]
+        else:
+            g = _FONT.get(ch)
+        if g:
+            for k, bit in enumerate(g):
+                if bit == "1":
+                    i, j = 2 + (k // 3) * 2, x + (k % 3) * 2
+                    img[i:i + 2, j:j + 2] = (255, 255, 255)
+        x += 8
+
+
+def render_roadmap(world, master, out, gd, scale=3, stages=None, cols=3, gap=8, rect=None):
+    """One PNG: the end state (all zones, entities coloured by stage) and one panel per stage (that stage solid,
+    earlier stages grey, removals of that stage marked with a yellow X, reserved zones outlined)."""
+    rect = rect or master_window(master, gd)
+    ks = [s.index for s in master.stages] if stages is None else list(stages)
+    panels = [draw_master(world, master, gd, None, rect, scale)] + [draw_master(world, master, gd, k, rect, scale)
+                                                                   for k in ks]
+    rows = [panels[i:i + cols] for i in range(0, len(panels), cols)]
+    W = max(sum(p.shape[1] for p in r) + gap * (len(r) - 1) for r in rows)
+    H = sum(max(p.shape[0] for p in r) for r in rows) + gap * (len(rows) - 1)
+    sheet = np.zeros((H, W, 3), np.uint8)
+    sheet[:] = (255, 255, 255)
+    y = 0
+    for r in rows:
+        x = 0
+        for p in r:
+            sheet[y:y + p.shape[0], x:x + p.shape[1]] = p
+            x += p.shape[1] + gap
+        y += max(p.shape[0] for p in r) + gap
+    Path(out).write_bytes(png_bytes(sheet))
+    return rect
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("map_dir")

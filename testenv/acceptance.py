@@ -1,9 +1,9 @@
 """M1 acceptance test (SPEC-v3 M1.10) on a headless test slot. Never talks to the real game.
 
     .venv\\Scripts\\python.exe testenv\\acceptance.py [--seeds 1001 2002 3003] [--stages bootstrap electric]
-        [--variants all|0] [--minutes 12] [--boot-minutes 32] [--refuel-at 17] [--speed 10] [--slot 11]
+        [--variants all|0] [--minutes 12] [--boot-minutes 32] [--refuel-at 17] [--speed 10] [--slot 31]
         [--name accept] [--mcp-seed 1001]
-        [--claude-seed 1001 | --claude-seed 0] [--out testenv/acceptance_results.json]
+        [--claude-seed 0 (default, no paid call) | --claude-seed 1001] [--out testenv/acceptance_results.json]
 
 Per seed and stage: fresh map (restart.ps1 -Save seed_<n>.zip) -> planner (Python API; on --mcp-seed the bootstrap
 stage goes through the real MCP tool path instead: run_server.py over stdio, tool plan_starter_base) -> every variant in
@@ -497,6 +497,107 @@ def claude_round_trip(slot, a, seed, out):
     return rec
 
 
+# ---------------------------------------------------------------- planner v3 (master plans)
+
+def main_v3(a):
+    """--planner v3: every master plan master_options offers on each seed, built stage by stage up to --to (cheat
+    mode: the tests/live_master.py scaffolding - ghosts placed and instant-built, a stage's swaps removed first,
+    its research gate set by script, the planner's start fuel) and then run untouched for --minutes: measured
+    plates / red / green per minute against the master's stage_rates (>= THRESHOLD), no burner out of fuel, the labs
+    researching. The real-helper path for v3 stages (B2/B3) is tests/live_stages.py."""
+    sys.path.insert(0, str(ROOT))
+    sys.path.insert(0, str(ROOT / "tests"))
+    import live_master as LM
+    from factorio_claude import rcon
+    from factorio_claude.planner import master as M
+    from factorio_claude.planner.state import BaseState
+    from factorio_claude.planner.testing import load_fixture, load_state
+    results = {"started": time.strftime("%Y-%m-%d %H:%M:%S"), "args": vars(a), "planner": "v3", "runs": []}
+    all_ok = True
+
+    def save():
+        Path(a.out).write_text(json.dumps(results, indent=1, default=str), encoding="utf-8")
+    try:
+        for seed in a.seeds:
+            w, gd = load_fixture(seed)
+            st = load_state(seed) or BaseState.fresh_start()
+            opts = M.master_options(w, gd, st, {"near": st.pos or (0, 0)})
+            idx = range(len(opts)) if a.variants == "all" else [int(i) for i in a.variants.split(",")]
+            for i in idx:
+                if i >= len(opts):
+                    continue
+                mp, info = opts[i]
+                res = {"seed": seed, "variant": mp.variant, "master": mp.id, "recommended": info["recommended"],
+                       "offline_ok": info["check"]["ok"], "belts": sum(r["tiles"] for r in mp.routes)}
+                print(f"-- {seed} {mp.variant} ({mp.id}): building up to S{a.to}")
+                t0 = time.time()
+                try:
+                    LM.restart(a.slot, f"seed_{seed}.zip")
+                    rcon._client = rcon.Rcon("127.0.0.1", 27016 + a.slot, "testpw")
+                    for _ in range(60):
+                        try:
+                            rcon.lua("rcon.print('ping')")
+                            break
+                        except Exception:  # noqa: BLE001
+                            time.sleep(1)
+                    rcon.lua("rcon.print('warm')")
+                    LM.lua("s.peaceful_mode = true for _, e in pairs(s.find_entities_filtered{force = 'enemy'}) do "
+                           "e.destroy() end rcon.print('ok')")
+                    LM.clear_obstacles(mp)
+                    built = {}
+                    last = None
+                    for stg in mp.stages:
+                        k = stg.index
+                        if k > a.to:
+                            break
+                        LM.research(stg.gate)
+                        LM.remove(M.removed_in(mp, k))
+                        new = M.new_in(mp, k)
+                        built[M.slabel(k)] = LM.build(new, M.slabel(k))
+                        LM.start_fuel(new)
+                        last = k
+                    res["built"] = built
+                    green = last >= 5
+                    bufs = [(e.x, e.y) for e in mp.ents if M.alive(e, last) and (e.extra or {}).get("role") == "buffer"]
+                    LM.run(max(1.0, a.warmup), bufs, speed=a.speed, green=green)   # assemblers and belts fill first
+                    c0 = LM.census(mp, last)
+                    LM.run(a.minutes / 2, bufs, speed=a.speed, green=green)
+                    c1 = LM.census(mp, last)
+                    LM.run(a.minutes / 2, bufs, speed=a.speed, green=green)
+                    c2 = LM.census(mp, last)
+                    want = M.stage_rates(mp, gd, last)
+                    dt = (c2["tick"] - c0["tick"]) / 3600
+                    got = {}
+                    for key, item in (("iron", "iron-plate"), ("copper", "copper-plate"),
+                                      ("red", "automation-science-pack"), ("green", "logistic-science-pack")):
+                        if item in want:
+                            got[item] = round((c2[key] - c0[key]) / max(dt, 1e-9), 1)
+                    ratio = {k: round(got[k] / want[k], 2) for k in got if want.get(k)}
+                    res.update({"after": M.slabel(last), "planned_per_min": want, "measured_per_min": got,
+                                "ratio": ratio, "nofuel_end": c2["nofuel"], "labs": [c2["labs_working"], c2["labs"]],
+                                "missing": c2["missing"], "drills": c2["drills"]})
+                    # a plate rate can sit below plan only because nothing consumes it (side B before S5): the
+                    # science packs are the real output
+                    ok = all(v >= THRESHOLD for k, v in ratio.items() if k.endswith("science-pack") or last < 3)
+                    ok = ok and not c2["nofuel"] and c2["missing"] == 0 and all(
+                        b["n_failed"] == 0 for b in built.values())
+                    res["ok"] = bool(ok)
+                except Exception as e:  # noqa: BLE001
+                    res["ok"], res["error"] = False, repr(e)
+                res["wall_s"] = round(time.time() - t0, 1)
+                all_ok &= res["ok"]
+                print(f"   {'PASS' if res['ok'] else 'FAIL'} {res.get('after')} measured={res.get('measured_per_min')} "
+                      f"plan={res.get('planned_per_min')} nofuel={len(res.get('nofuel_end') or [])}")
+                results["runs"].append(res)
+                save()
+        results["pass"] = all_ok
+        save()
+    finally:
+        LM.restart(a.slot, "", stop=True)
+    print("RESULT", "PASS" if all_ok else "FAIL", "->", a.out)
+    return 0 if all_ok else 1
+
+
 # ---------------------------------------------------------------- main
 
 def main():
@@ -504,23 +605,29 @@ def main():
     ap.add_argument("--seeds", type=int, nargs="+", default=[1001, 2002, 3003])
     ap.add_argument("--stages", nargs="+", default=["bootstrap", "electric"])
     ap.add_argument("--variants", default="all", help="all | comma list of indices (0 = first variant)")
-    ap.add_argument("--planner", default="v2", choices=("v1", "v2"), help="v2 = staged.plan_options (default)")
+    ap.add_argument("--planner", default="v2", choices=("v1", "v2", "v3"),
+                    help="v2 = staged.plan_options (default); v3 = master plans, stage by stage up to --to")
+    ap.add_argument("--to", type=float, default=3, help="planner v3: last stage built (3 = red science, 5 = green)")
     ap.add_argument("--minutes", type=float, default=12, help="in-game minutes run per electric variant (>= 10)")
     ap.add_argument("--boot-minutes", type=float, default=32,
                     help="in-game minutes per bootstrap variant (longer than one load of hand fuel lasts)")
     ap.add_argument("--refuel-at", type=float, default=17, help="bootstrap: helper refuel after this many minutes")
     ap.add_argument("--warmup", type=float, default=5, help="in-game minutes before the measuring window")
     ap.add_argument("--speed", type=float, default=10)
-    ap.add_argument("--slot", type=int, default=11)
+    ap.add_argument("--slot", type=int, default=31, help="test slot 31-39 (never the real game's ports)")
     ap.add_argument("--name", default="accept")
     ap.add_argument("--mcp-seed", type=int, default=1001, help="seed whose bootstrap plans come via the MCP tool")
-    ap.add_argument("--claude-seed", type=int, default=1001, help="0 = skip the real Claude round trip")
+    ap.add_argument("--claude-seed", type=int, default=0,
+                    help="seed for one real (paid) Claude round trip; 0 (default) = skip it")
     ap.add_argument("--claude-only", action="store_true")
     ap.add_argument("--out", default=str(ROOT / "testenv" / "acceptance_results.json"))
     ap.add_argument("--no-cheat", action="store_true",
                     help="player-like server (-NoDebugOps): the real helper builds and fuels the plan (plan_helper "
                          "build), nothing is revived or handed out; first plates measured against the plan's ETA")
     a = ap.parse_args()
+    assert 31 <= a.slot <= 39, "test slots 31-39 only"
+    if a.planner == "v3":
+        return main_v3(a)
     if a.planner == "v2" and "electric" in a.stages:
         # planner v2: stage 1 is built here; stage 2 (placed) by tests/live_onsite.py --stage2-minutes; stage 3 is an
         # estimate on the cards

@@ -1,4 +1,35 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.5.0
+Date: 2026-10-29
+  Features:
+    - Starter-base planner v3: the whole starter base is designed first (through automated red and green science),
+      then split into stages that only add to it or swap in place: S0 burner iron + coal, S1 burner copper, S2 steam
+      power + labs, S3 automated red science, S4 electric drills in the burner drills' slots, S5 green science.
+    - Burner drills sit in the slots of the electric drills that replace them; poles, belts and the steam block are
+      reserved from the start. Later stages are drawn as faint outlines in the preview.
+    - The later stages wait in the Plans tab (Roadmap) and are offered automatically when their research is done and
+      the stage before them is built ("Stage ready: ...").
+    - Green science block: cables, circuits, gears, inserters and belts from their own assemblers, 0.5 packs/s.
+    - Variants differ in topology: a central hub (furnaces and science in one block; each ore field sends its ore
+      and coal on one belt) or smelting at each ore field (one plate belt per metal, split for green science at S5;
+      the columns' far side keeps plate chests for building). The recommended one says why.
+    - Nothing built in an early stage is ever taken up again: the only removals are in-place swaps (burner drill ->
+      electric drill, burner inserter -> inserter, a temporary chest -> the belt that replaces it).
+    - S3 builds 10 labs, S5 16, so the labs use the 30 red (and 30 green) packs/min the assemblers make.
+    - Plans tab roadmap rows show each later stage's build time, what it needs and what it replaces.
+  Changes:
+    - Your idle builds are only taken apart, and coal only taken out of your idle machines, when you allow it
+      (planner option allow_removal, off by default). New belts may still cut an idle belt line where they cross
+      it; the card lists those tiles.
+    - Smelting-column burner inserters get 10 coal per fill (one ran dry right after the first stage).
+    - The helper's message says what its round really does (hand-fed burners vs only restarting coal fields); belt-fed
+      boilers of a planner v3 stage are no longer refuelled by hand.
+    - From steam power on, every smelting-column inserter is electric (burner inserters moving ore ran out of fuel).
+    - Approving a stage whose belt crosses one of your idle belt lines takes out just the crossed tiles.
+    - Helper: primes coal fields and restarts one that stopped; stores salvage in a chest of its own when its
+      inventory is full; fetches start fuel for every batch of burners it places.
+    - place_ghosts keeps the input/output half of underground belts.
+---------------------------------------------------------------------------------------------------
 Version: 0.4.1
 Date: 2026-10-29
   Features:

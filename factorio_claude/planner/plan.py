@@ -79,8 +79,11 @@ class Plan:
         for e in self.entities:
             row = [e.name, e.x, e.y, int(e.direction or 0)]
             ex = e.extra if isinstance(e.extra, dict) else {}
-            ug, manual = ex.get("type"), ex.get("fuel") == "manual"
-            extra = dict({"fuel": "manual"}, **({"type": ug} if ug else {})) if manual else ug
+            ug, manual, prime = ex.get("type"), ex.get("fuel") == "manual", ex.get("prime")
+            extra = dict({"fuel": "manual"}, **({"type": ug} if ug else {}),
+                         **({"fuel_n": int(ex["fuel_n"])} if ex.get("fuel_n") else {})) if manual else ug
+            if prime and not manual:      # planner v3: a self-feeding burner the helper primes with `prime` coal
+                extra = dict({"prime": int(prime)}, **({"type": ug} if ug else {}))
             if e.recipe or extra:
                 row.append(e.recipe)
             if extra:
@@ -109,11 +112,21 @@ class Plan:
         if s.get("build_order"):      # site boxes [x0, y0, x1, y1] the helper builds one after the other
             args["build_order"] = [list(b) for b in s["build_order"]]
         if s.get("keep_fuelled"):     # stage 2: the previous stage's hand-fed burners stay in the coal round
-            args["keep_fuelled"] = [[r[1], r[2], r[3]] for r in s["keep_fuelled"]]
+            args["keep_fuelled"] = [[r[1], r[2], r[3]] + ([1] if len(r) > 4 and r[4] else [])
+                                    for r in s["keep_fuelled"]]
         if s.get("reserve"):          # ground of the next stage: the helper builds no smelter of its own there
             args["reserve"] = [[float(v) for v in b] for b in s["reserve"]]
+        if s.get("reserved"):         # planner v3: later stages' zones, drawn as faint outlines (no ghosts)
+            args["zones"] = [[float(z["rect"][0]), float(z["rect"][1]), float(z["rect"][2]), float(z["rect"][3]),
+                              f"{z.get('label', '')}", z.get("kind", "")] for z in s["reserved"][:64]]
         if s.get("take_from"):        # stage 2: chests whose plates the helper uses first (stage 1's output)
             args["take_from"] = [list(p) for p in s["take_from"]]
+        if isinstance(s.get("master"), dict) and s["master"].get("id"):   # planner v3: the master plan it belongs to
+            args["master"] = str(s["master"]["id"])
+        if s.get("future"):           # planner v3: a later stage, offered by the mod when its gate opens
+            args["future"] = dict(s["future"])
+        if s.get("wire_with"):        # planner v3: earlier stages' poles this stage's poles are wired to
+            args["wire_with"] = [[float(p[0]), float(p[1])] for p in s["wire_with"][:1000]]
         facts = self.facts()
         if facts:
             args["facts"] = facts
@@ -129,6 +142,8 @@ class Plan:
         ex = {"ports": [Port(*p) for p in self.stats.get("ports") or []]}
         if self.stats.get("assume_research"):
             ex["assume_research"] = True
+        if self.stats.get("connect_existing"):   # planner v3 stage plans continue the stages already built
+            ex["connect_existing"] = True
         return ex
 
     def revalidate(self, gd, world):

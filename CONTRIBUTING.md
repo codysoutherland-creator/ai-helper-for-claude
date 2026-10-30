@@ -93,6 +93,16 @@ In-engine checks (each on its own slot):
 - `testenv/acceptance.py`: planner acceptance on the 3 fixture seeds (plan, apply, build, run at speed 10, compare
   measured output with the plan). About an hour; `--variants 0 --stages bootstrap` for a quick run. `--no-cheat`:
   player-like server, the real helper builds and fuels the plan from nothing, first plates measured against the ETA.
+- `tests/live_stages.py --save <zip> [--slot 32] [--to 5] [--player-lab]`: planner v3 stage by stage with the real
+  helper on a `-NoDebugOps` server through the shipped tool path (plan_starter_base, the mod's own "stage ready"
+  offer, plan_next_stage, plan_apply, plan_helper build): measured build minutes vs the offer's "ready in", 30 game
+  minutes with the helper stopped after S2 and after S3 (plates, packs, fuel, power per 3-minute window), research
+  from the assemblers' packs, an entity census by unit_number around the electric-drill swap (S4), green packs/min
+  after S5. `--player-lab` marks the red-science trigger done on a fresh map (a headless server has no player to
+  craft the lab); results in `testenv/inst/live_stages_<tag>.json`.
+- `testenv/acceptance.py --planner v3 [--to 5]`: every master plan offered on the fixture seeds, built stage by stage
+  with test cheats (instant build, research and start fuel by script), then run untouched: plates, red and green
+  packs per minute against the plan, no burner out of fuel.
 - `tests/live_onsite.py --save <zip> --variant quick`: one planner v2 variant built by the real helper on a
   `-NoDebugOps` server (Approve via `plan_apply`, then `plan_helper build`): first plates vs the ETA, plate rate,
   burner fuel, player ghosts and the force's entities before/after.
@@ -140,6 +150,33 @@ Checked in this engine; please don't "fix" code that relies on them:
 - A script-placed pole ghost auto-connects to whatever pole or pole ghost is nearest, including a player's ghost the
   helper never builds, and skips the direct link to a pole it already reaches through that ghost: a planned line can
   stay cut. `plans.lua` therefore wires every pair of the plan's poles within reach explicitly after applying.
+- Planner v3 blocks (`tests/live_v3_blocks.py`, engine checks E1-E7 of PLANNER-v3.md): a burner drill in the
+  belt-side columns and top rows of an east 3x3 electric-drill slot drops on the same belt lane (the right one) as
+  the electric drill of that slot; burner drills and their burner inserters both built EMPTY run on coal the
+  inserter takes from a belt (the inserter fuels itself from the coal it carries); ore side-loaded from the west and
+  coal from the east onto the smelter column's middle belt stay on separate lanes; a burner output inserter moves
+  ~65 plates per coal; an electric-drill ghost fits (`manual_ghost`) over a burner drill + burner inserter marked
+  for deconstruction, an inserter ghost over a marked burner inserter, a belt ghost over a marked chest; small poles
+  on the field's gap rows (pitch 7) power every drill from one source; a boiler row with empty boilers and empty
+  burner inserters starts from coal on its belt alone (black start).
+- A burner inserter that moves ore AND coal into a stone furnace from a mixed belt refuels itself only when the
+  furnace asks for coal; with the furnace's fuel slot kept full it burns its own fuel on ore swings and stops for
+  good, sometimes holding ore (real-save copy, round 1 of planner v3). Smelting-column inserters are therefore
+  electric from the steam-power stage on (same tiles, swapped in place); burner inserters only move coal.
+- Planner v3 green block (`tests/live_v3_blocks.py green`, E8): fed with plates at its two ports it makes
+  0.496 logistic science packs/s (plan 0.5), all on one lane of the spine (red uses the other); the smelting
+  column's electric phase (E9: electric input and output inserters, poles at x 1, 4 and 9 every 4 rows) runs every
+  furnace from one pole source.
+- Planner v3 round 3 (`tests/live_v3_blocks.py mixed_chain split_branch`): a mining field's head can side-load its
+  ore (both field lanes) onto the left lane and the coal that passed its corridor onto the right lane of ONE belt;
+  that belt feeds a smelting column's middle belt straight and every furnace gets ore and coal from it (E11: trunk
+  lanes ore | coal only, 287 plates from 300 ore). A splitter that replaces one tile of a plate belt (that tile is
+  one half, the lateral tile the other) sends plates both along the line and into a branch starting in front of
+  its other half (E12).
+- A character's hand craft whose product does not fit its inventory waits for ever (round 3, real-save copy: the
+  helper took apart 17 plate chests full of plates at S5 and stopped crafting the last 12 belts). The helper now
+  stores its surplus in chests of its own before it fetches or crafts, and gives up a craft that waits on a full
+  inventory for 10 s.
 - Planner v2 ETA model vs the real helper (`tests/live_onsite.py`, `acceptance.py --no-cheat`, no debug ops): first
   plates 1.52 min measured vs 1.5 predicted on a real-save copy (quick start, 60 plates/min held), 8.2-14.7 min vs
   9.0-13.0 predicted from an empty inventory on the fixture seeds.

@@ -191,6 +191,9 @@ local function hide(p)
 end
 
 local WHITE = {0.9, 0.9, 0.9, 0.9}
+-- planner v3 reserved zones by kind
+local ZONE_COLOR = {mine = {1, 0.65, 0.25}, coal = {0.6, 0.6, 0.6}, smelt = {1, 1, 1}, science = {0.8, 0.5, 1},
+  power = {1, 0.3, 0.3}, mall = {0.5, 0.8, 1}}
 
 -- draw entities [job.i, job.i + n): fills are accumulated per kind and drawn merged at the end
 local function draw_step(p, n)
@@ -267,6 +270,21 @@ local function draw_step(p, n)
         left_top = {r[1], r[2]}, right_bottom = {r[3], r[4]}}
       objs[#objs + 1] = rendering.draw_rectangle{surface = surface, forces = forces, color = chart, filled = true,
         render_mode = "chart", left_top = {r[1], r[2]}, right_bottom = {r[3], r[4]}}
+    end
+  end
+  for _, z in ipairs(p.zones or {}) do   -- reserved for later stages: faint fill, thin outline, label
+    local zc = ZONE_COLOR[z[6]] or {0.8, 0.8, 0.8}
+    for _, mode in ipairs({"game", "chart"}) do
+      objs[#objs + 1] = rendering.draw_rectangle{surface = surface, forces = forces, filled = true,
+        color = {zc[1] * 0.08, zc[2] * 0.08, zc[3] * 0.08, 0.08}, render_mode = mode,
+        left_top = {z[1], z[2]}, right_bottom = {z[3], z[4]}}
+      objs[#objs + 1] = rendering.draw_rectangle{surface = surface, forces = forces, filled = false, width = 1,
+        color = {zc[1] * 0.6, zc[2] * 0.6, zc[3] * 0.6, 0.6}, render_mode = mode,
+        left_top = {z[1], z[2]}, right_bottom = {z[3], z[4]}}
+    end
+    if z[5] ~= "" then
+      objs[#objs + 1] = rendering.draw_text{surface = surface, forces = forces, text = z[5], scale = 1.2,
+        color = {zc[1], zc[2], zc[3], 0.8}, target = {z[1] + 0.3, z[2] + 0.2}}
     end
   end
   local bb = p.bbox
@@ -369,7 +387,7 @@ api.register("plan_preview", function(args)
     storage.plans[id] = p
   end
   if args.title ~= nil then p.title = strip(args.title) end
-  for _, k in ipairs({"variant", "stage", "group"}) do
+  for _, k in ipairs({"variant", "stage", "group", "master"}) do
     if args[k] ~= nil then p[k] = tostring(args[k]) end
   end
   p.title = p.title or id
@@ -453,7 +471,7 @@ api.register("plan_preview", function(args)
     p.keep_fuelled = {}
     for _, d in pairs(args.keep_fuelled) do
       if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and #p.keep_fuelled < 500 then
-        p.keep_fuelled[#p.keep_fuelled + 1] = {d[1], d[2], tonumber(d[3]) or 10}
+        p.keep_fuelled[#p.keep_fuelled + 1] = {d[1], d[2], tonumber(d[3]) or 10, d[4] == 1 or nil}
       end
     end
   end
@@ -463,6 +481,38 @@ api.register("plan_preview", function(args)
       if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and type(d[3]) == "number" and
           type(d[4]) == "number" and #p.reserve < 500 then
         p.reserve[#p.reserve + 1] = {d[1], d[2], d[3], d[4]}
+      end
+    end
+  end
+  -- planner v3: ground later stages of the master plan build on {{x0, y0, x1, y1, label, kind}} (drawn faint, no
+  -- ghosts; at most 64)
+  if args.zones ~= nil then
+    p.zones = {}
+    for _, d in pairs(args.zones) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and type(d[3]) == "number" and
+          type(d[4]) == "number" and #p.zones < 64 then
+        p.zones[#p.zones + 1] = {d[1], d[2], d[3], d[4], strip(tostring(d[5] or "")), tostring(d[6] or "")}
+      end
+    end
+  end
+  -- planner v3: a later stage of a master plan {master, label, gate = {tech...}, after = plan id}. It waits (status
+  -- "future", not drawn, no ghosts) until every gate tech is researched and the `after` stage is built; then it is
+  -- offered (status "proposed", a print + a companion event "stage_ready <id>")
+  if type(args.future) == "table" then
+    local fu = args.future
+    p.future = {master = tostring(fu.master or ""), label = strip(tostring(fu.label or "")), gate = {},
+      after = fu.after ~= nil and tostring(fu.after) or nil, order = tonumber(fu.order) or 0}
+    for _, t in pairs(fu.gate or {}) do
+      if type(t) == "string" and #p.future.gate < 8 then p.future.gate[#p.future.gate + 1] = t end
+    end
+    if fu.waiting ~= false and p.status == "proposed" then p.status = "future" end
+  end
+  -- planner v3: poles of earlier stages {{x, y}} this stage's poles are wired to explicitly (see wire_poles)
+  if args.wire_with ~= nil then
+    p.wire_with = {}
+    for _, d in pairs(args.wire_with) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and #p.wire_with < 1000 then
+        p.wire_with[#p.wire_with + 1] = {d[1], d[2]}
       end
     end
   end
@@ -489,7 +539,7 @@ api.register("plan_preview", function(args)
   local u = {}
   for n in pairs(unknown) do u[#u + 1] = n end
   if #u > 0 then out.unknown = u end
-  if args.show == false then
+  if args.show == false or p.status == "future" then
     if p.shown then hide(p) end
     changed()
   else
@@ -520,7 +570,7 @@ local function plan_info(p, full)
     entities = #p.entities, deconstruct = #p.deconstruct, surface = p.surface, force = p.force, shown = p.shown or false,
     drawing = p.draw ~= nil, superseded = p.superseded,
     summary = p.lines, warnings = p.warnings, validation = p.validation, bbox = p.bbox, tick = p.tick, result = p.result,
-    facts = p.facts}
+    facts = p.facts, future = p.future, ready_tick = p.ready_tick}
   if p.removes and #p.removes > 0 then o.removes = plans.removal_counts(p) end
   if p.takes and #p.takes > 0 then o.takes = {listed = #p.takes, done = p.takes_done or false} end
   if full then o.counts = entity_brief(p) end
@@ -654,8 +704,21 @@ local function wire_poles(p, surface, force)
       end
     end
   end
+  local own = #poles
+  for _, d in ipairs(p.wire_with or {}) do   -- an earlier stage's poles (built by now, or still ghosts)
+    local f = surface.find_entities_filtered{position = {d[1], d[2]}, radius = 0.3, force = force, limit = 1,
+      type = "electric-pole"}[1] or surface.find_entities_filtered{position = {d[1], d[2]}, radius = 0.3,
+      force = force, limit = 1, ghost_type = "electric-pole"}[1]
+    if f then
+      local reach = 7.5
+      local okr, v = pcall(function() return (f.type == "entity-ghost" and f.ghost_prototype or f.prototype)
+        .get_max_wire_distance() end)
+      if okr and type(v) == "number" then reach = v end
+      poles[#poles + 1] = {e = f, reach = reach}
+    end
+  end
   local n = 0
-  for i = 1, #poles do
+  for i = 1, own do
     local a = poles[i]
     for j = i + 1, #poles do
       local b = poles[j]
@@ -708,7 +771,9 @@ local function apply_step(p, n)
             ghost = f.ghost_name
           end
         elseif f.name == name and f.force == force and f.position.x == pos.x and f.position.y == pos.y then
-          existing = true
+          -- the same entity there counts as built, unless this plan takes it apart (a planner v3 belt crossing the
+          -- player's idle belt line: their tile goes, ours comes); then the ghost is placed over the marked one
+          if not (f.unit_number and p.removing and p.removing[f.unit_number]) then existing = true end
         elseif t == "tree" or t == "simple-entity" then
           clear[#clear + 1] = f
         elseif t == "cliff" then
@@ -829,6 +894,16 @@ function plans.apply(id)
       q.superseded = p.id
       if q.shown then hide(q) end
     end
+  end
+  -- planner v3: approving a stage of one master plan drops the waiting stages of the other masters (variants)
+  if p.master then
+    local drop = {}
+    for qid, q in pairs(storage.plans) do
+      if q ~= p and q.status == "future" and q.force == p.force and q.future and q.future.master ~= p.master then
+        drop[#drop + 1] = qid
+      end
+    end
+    for _, qid in ipairs(drop) do pcall(plans.drop, qid) end
   end
   p.apply = {i = 1, r = r, marked = {}}
   local ok, done = pcall(apply_step, p, SLICE)
@@ -1011,21 +1086,130 @@ end
 -- once it is below half, so far sites are visited about every 10 minutes)
 local FILL = {["mining-drill"] = 50, furnace = 30, inserter = 5, boiler = 50}
 
--- {{x, y, n}, ...} of the entities a player (or the helper) fuels by hand: extra.fuel = "manual", boilers; n = coal
--- per fill (extra.fuel_n, else by type). In plan order (planner v2 lists its coal drills first, then each pair).
+---------------------------------------------------------------------------
+-- planner v3 roadmap: later stages wait as "future" plans and are offered when they can be built
+---------------------------------------------------------------------------
+
+-- every ghost of an applied plan is built and every entity it listed for removal is gone
+function plans.stage_built(p)
+  if not p or p.status ~= "applied" then return false end
+  if p.removing and next(p.removing) ~= nil then return false end
+  if p.deferred and #p.deferred > 0 then return false end
+  local surface = game.get_surface(p.surface)
+  local bb = p.bbox
+  if not (surface and bb) then return false end
+  for _, g in pairs(surface.find_entities_filtered{area = {{bb[1] - 1, bb[2] - 1}, {bb[3] + 1, bb[4] + 1}},
+      type = "entity-ghost", force = p.force}) do
+    local ok, tags = pcall(function() return g.tags end)
+    if ok and type(tags) == "table" and tags.claude_plan == p.id then return false end
+  end
+  return true
+end
+
+local function gate_open(p)
+  local force = game.forces[p.force]
+  if not force then return false end
+  for _, t in ipairs(p.future and p.future.gate or {}) do
+    local tech = force.technologies[t]
+    if not (tech and tech.researched) then return false end
+  end
+  return true
+end
+
+-- what a waiting stage waits for (Plans tab roadmap line): missing research (names), previous stage built?
+function plans.waiting_for(p)
+  local fu = p.future
+  if not fu then return {}, true end
+  local force = game.forces[p.force]
+  local missing = {}
+  for _, t in ipairs(fu.gate or {}) do
+    local tech = force and force.technologies[t]
+    if not (tech and tech.researched) then missing[#missing + 1] = t end
+  end
+  local after = fu.after and storage.plans[fu.after]
+  return missing, (not after) or plans.stage_built(after)
+end
+
+-- future stages whose research is done and whose previous stage is built become proposed (offered). -> n offered
+function plans.check_ready()
+  init()
+  local n = 0
+  for _, p in pairs(storage.plans) do
+    if p.status == "future" and p.future and gate_open(p) then
+      local after = p.future.after and storage.plans[p.future.after]
+      -- a previous stage that was dismissed (no longer listed) does not block its successor
+      if not after or plans.stage_built(after) then
+        storage.plan_seq = storage.plan_seq + 1
+        p.status, p.seq, p.ready_tick = "proposed", storage.plan_seq, game.tick
+        n = n + 1
+        local force = game.forces[p.force]
+        local msg = "Stage ready: " .. (p.future.label ~= "" and p.future.label or tostring(p.title)) ..
+          ". Preview and approve it in the Plans tab."
+        if force then
+          for _, pl in pairs(force.connected_players) do
+            pl.print({"", "[color=0.85,0.47,0.34][Claude helper][/color] ", msg})
+          end
+        end
+        local okt, transport = pcall(require, "scripts.transport")
+        if okt and type(transport) == "table" and transport.post_event then
+          pcall(transport.post_event, "stage_ready " .. p.id)
+        end
+      end
+    end
+  end
+  if n > 0 then changed() end
+  return n
+end
+
+api.register("plan_check_ready", function() return {offered = plans.check_ready()} end)
+
+local function any_future()
+  for _, p in pairs(storage.plans or {}) do
+    if p.status == "future" then return true end
+  end
+  return false
+end
+
+local ev_ready = require("scripts.events")
+ev_ready.on(defines.events.on_research_finished, function()
+  local ok, err = pcall(plans.check_ready)
+  if not ok then log("claude-bridge check_ready: " .. tostring(err)) end
+end)
+ev_ready.on_nth_tick(600, function()     -- a stage counts as built once its last ghost is: checked every 10 s
+  local ok, err = pcall(function()
+    if any_future() then plans.check_ready() end
+  end)
+  if not ok then log("claude-bridge check_ready: " .. tostring(err)) end
+end)
+
+-- {{x, y, n, primed?}, ...} of the entities a player (or the helper) fuels by hand: extra.fuel = "manual", boilers
+-- (planner v1/v2 only: a planner v3 stage's boilers are fed by a coal belt); n = coal per fill (extra.fuel_n, else by
+-- type). primed = a planner v3 self-feeding coal-field burner: the helper only starts it and restarts it should it
+-- ever stop (not hand-fed). In plan order (planner v2 lists its coal drills first, then each pair).
 function plans.fuel_at(p, existing_only)
   local out = {}
   for _, r in ipairs(p.refuel_existing or {}) do out[#out + 1] = {r[2], r[3], r[5]} end  -- S0 repairs first
   if existing_only then return out end
   for _, e in ipairs(p.entities) do
     local proto = prototypes.entity[e[1]]
-    if (e[6] and e[6].fuel == "manual") or (proto and proto.type == "boiler") then
+    if (e[6] and e[6].fuel == "manual") or (proto and proto.type == "boiler" and not p.master) then
       local n = e[6] and tonumber(e[6].fuel_n) or (proto and FILL[proto.type]) or 10
       out[#out + 1] = {e[2], e[3], n}
+    elseif e[6] and tonumber(e[6].prime) then
+      -- planner v3: a self-feeding burner (coal field) runs on what it mines once it has a few coal; the helper
+      -- primes it and its round restarts it should it ever stop
+      out[#out + 1] = {e[2], e[3], tonumber(e[6].prime), true}
     end
   end
-  for _, r in ipairs(p.keep_fuelled or {}) do out[#out + 1] = {r[1], r[2], r[3]} end  -- the previous stage's burners
+  for _, r in ipairs(p.keep_fuelled or {}) do out[#out + 1] = {r[1], r[2], r[3], r[4]} end  -- earlier stages' burners
   return out
+end
+
+-- how many of fuel_at's entries are hand-fed (not just primed coal-field burners)
+function plans.hand_fed(fuel_at)
+  local n = 0
+  for _, r in ipairs(fuel_at or {}) do if not r[4] then n = n + 1 end end
+  return n
 end
 
 -- {id, what = "build"|"refuel"|"round", player?}: the helper builds the plan's ghosts (S0 fuel takes and listed

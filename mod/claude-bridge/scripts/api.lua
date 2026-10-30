@@ -380,6 +380,8 @@ local function place_ghost(surface, force, g, plan)
   local p = pos_of(g.position) or {x = g.x, y = g.y}
   local params = {name = "entity-ghost", inner_name = g.name, position = p, direction = parse_dir(g.direction),
     force = force, tags = {claude_plan = plan}}
+  -- underground belts: which half (without it both halves come out as entrances and never pair)
+  if g.type == "input" or g.type == "output" then params.type = g.type end
   if not surface.can_place_entity{name = g.name, position = p, direction = params.direction, force = force,
       build_check_type = defines.build_check_type.script_ghost} then
     return nil, "blocked"

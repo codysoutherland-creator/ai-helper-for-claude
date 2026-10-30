@@ -805,3 +805,345 @@ def inserter_tap(gd=None, *, item="coal", inserter="burner-inserter", belt="tran
     if _burner(G, inserter) and not G.fuel_value(item):
         ents[2].extra = {"fuel": "manual"}
     return _finish(b.rotated(SIDES[output_side]), gd)
+
+
+# ---- planner v3: master-plan blocks (docs/design/PLANNER-v3.md section 6) -------------------------------------------
+# Every entity carries extra {"role": ..., "unit": i, "row": r}: the master plan stage-tags entities from these, and
+# derives swap slots and pole positions from data instead of geometry. Where the two phases differ a block holds
+# BOTH (the burner drill + burner inserter of a slot and the electric drill that replaces them; the burner and the
+# electric output inserter of one tile; a buffer chest and the plate belt that replaces it). A block is therefore
+# never validated as a whole, only as the stage subsets master.stage_entities() picks.
+FIELD_W = 9           # corridor | slot (3) | ore belt | slot (3) | spare column
+FIELD_PERIOD = 7      # rows per two slots along the belt: slot (3) + gap row (pole) + slot (3)
+FIELD_BELT_X = 4
+COLUMN_W = 11         # plate | out | furnace (2) | in | ORE/COAL | in | furnace (2) | out | plate
+
+
+def _r(role, **kw) -> dict:
+    d = {"role": role}
+    d.update({k: v for k, v in kw.items() if v is not None})
+    return d
+
+
+def field_slot_top(s: int) -> int:
+    """Top row of the s-th slot along a mining field's belt (row 0 is the head row)."""
+    return 1 + FIELD_PERIOD * (s // 2) + (4 if s % 2 else 0)
+
+
+def _drop(G, e) -> tuple:
+    vx, vy = rotate(*G.entity(e.name)["vector_to_place_result"], e.direction)
+    return e.x + vx, e.y + vy
+
+
+def mining_field(n_slots, gd=None, *, resource=None, self_feed=False, head_feed=False, mixed=False,
+                 belt="transport-belt", pole="small-electric-pole", burner="burner-mining-drill",
+                 electric="electric-mining-drill", burner_inserter="burner-inserter") -> Block:
+    """One lattice, two phases (PLANNER-v3 6.1). Canonical: the ore belt (x=4) flows north to the head (row 0) and
+    out at port (4, -1); slot k (k even: west x 1..3 facing east, k odd: east x 5..7 facing west) is a 3x3
+    electric-drill slot at rows field_slot_top(k // 2) .. +2. An east slot's burner phase: the 2x2 burner drill in
+    the slot's belt-side columns and top rows (it drops on the same belt lane as the electric drill) and a burner
+    inserter at (7, top) feeding it coal from the corridor belt at x=8. The corridor flows north from port (8, yt)
+    at the tail to port (8, -1) at the head, so coal leaves the field right next to the ore (coal on the right, as
+    the smelter column takes it) and the coal chain continues. Only east slots have a burner phase. Small poles sit
+    in the gap rows at x=3 (pitch 7, 4 drills each). self_feed (coal fields): the head turns the coal belt east into
+    its own corridor, which then flows south and leaves at the tail port (8, yt). head_feed (a field whose furnaces
+    get their coal another way, PLANNER-v3 round 2 "split" chains): the corridor is fed at the head, port (8, -1)
+    flowing south, right next to the ore port, and ends at the tail (the burner phase only; retired with the burner
+    drills). Entity extras: role drill_b/ins_b/drill_e (unit = slot k, drop_row), ore_belt/feed/corr (row),
+    field_pole (unit = period).
+    mixed (planner v3 round 3, the hub's ore fields): the ore and the coal that has passed the corridor leave on ONE
+    belt, ore on its left lane and coal on its right (a merge at the head, the smelter column's merge turned
+    around: both field lanes side-load onto the left lane, the coal onto the right one; role fmerge). That belt
+    feeds a column with a mixed input straight (smelter_column(mixed_in=True)): one trunk instead of an ore belt and
+    a coal belt side by side, and the coal leg to the field stays in use after the electric drills (it carries the
+    furnaces' coal on). The block is then 2 rows taller (the merge rows on top) and its ports are [mixed out at
+    (6, -1), coal in at the tail]."""
+    if mixed and (self_feed or head_feed):
+        raise ValueError("a mixed field is fed at the tail and is not a coal field")
+    G = _geo(gd)
+    if n_slots < 1:
+        raise ValueError("a mining field needs at least one slot")
+    per_side = math.ceil(n_slots / 2)
+    ents, max_drop = [], 0
+    for k in range(n_slots):
+        west, top = k % 2 == 0, field_slot_top(k // 2)
+        if west:
+            de = _put(G, electric, 1, top, EAST, extra=_r("drill_e", unit=k))
+            pair = []
+        else:
+            de = _put(G, electric, 5, top, WEST, extra=_r("drill_e", unit=k))
+            pair = [_put(G, burner, 5, top, WEST, extra=_r("drill_b", unit=k)),
+                    _put(G, burner_inserter, 7, top, EAST, extra=_r("ins_b", unit=k))]
+        lanes = []
+        for d in [de] + pair[:1]:
+            px, py = _drop(G, d)
+            if math.floor(px) != FIELD_BELT_X:
+                raise ValueError(f"{d.name} in slot {k} does not drop on the field belt")
+            lanes.append("left" if px - FIELD_BELT_X < 0.5 else "right")
+            d.extra["drop_row"] = math.floor(py)
+            max_drop = max(max_drop, math.floor(py))
+        if len(set(lanes)) != 1:
+            raise ValueError(f"slot {k}: burner and electric drill drop on different lanes")
+        de.extra["lane"] = lanes[0]
+        ents += [de] + pair
+    yt = field_slot_top(per_side - 1) + 3          # first row below the last slot: the corridor's tail port row
+    start = 1 if self_feed else 0
+    ents += [_put(G, belt, FIELD_BELT_X, r, NORTH, extra=_r("ore_belt", row=r)) for r in range(start, max_drop + 1)]
+    if self_feed:
+        ents += [_put(G, belt, x, 0, EAST, extra=_r("feed", row=0)) for x in range(FIELD_BELT_X, 8)]
+        ents += [_put(G, belt, 8, r, SOUTH, extra=_r("corr", row=r)) for r in range(0, yt)]
+        ports = [Port("belt_out", "coal", 8, yt, SOUTH)]
+    elif head_feed:
+        # down to the last burner inserter's row only: a belt that runs past every consumer and stops
+        last = max(e.y for e in ents if (e.extra or {}).get("role") == "ins_b") if any(
+            (e.extra or {}).get("role") == "ins_b" for e in ents) else 0
+        ents += [_put(G, belt, 8, r, SOUTH, extra=_r("corr", row=r)) for r in range(0, math.floor(last) + 1)]
+    else:
+        ents += [_put(G, belt, 8, r, NORTH, extra=_r("corr", row=r)) for r in range(0, yt)]
+    for p in range(math.ceil(per_side / 2)):
+        ents.append(_put(G, pole, 3, 1 + FIELD_PERIOD * p + 3, extra=_r("field_pole", unit=p)))
+    item = None
+    if resource:
+        item = mining_rate(G, electric, resource)[0]
+    if head_feed:
+        ports = [Port("belt_out", item, FIELD_BELT_X, -1, NORTH), Port("belt_in", "coal", 8, -1, SOUTH)]
+    elif not self_feed:
+        ports = [Port("belt_out", item, FIELD_BELT_X, -1, NORTH), Port("belt_in", "coal", 8, yt, NORTH),
+                 Port("belt_out", "coal", 8, -1, NORTH)]
+    # the block is as tall as its entities (a field with a single slot pair still carries its gap-row pole below it)
+    h = max([yt] + [math.ceil(e.y + G.size(e.name, e.direction)[1] / 2) for e in ents])
+    if mixed:
+        # merge rows -2..-1: ore (x 4) turns east and side-loads onto the mixed belt's west (left) lane at (6, -2),
+        # coal (x 8) turns west onto its east (right) lane; (6, -1) is the straightener behind it (a belt fed from
+        # behind takes side inputs as side-loads); then everything moves 2 rows down
+        M_ = [(FIELD_BELT_X, -1, NORTH), (FIELD_BELT_X, -2, EAST), (5, -2, EAST), (6, -2, NORTH), (6, -1, NORTH),
+              (8, -1, NORTH), (8, -2, WEST), (7, -2, WEST)]
+        ents += [_put(G, belt, x, y, d, extra=_r("fmerge", row=y, note="straightener" if (x, y) == (6, -1) else None))
+                 for x, y, d in M_]
+        ents = [e.moved(0, 2) for e in ents]
+        ports = [Port("belt_out", item, 6, -1, NORTH), Port("belt_in", "coal", 8, yt + 2, NORTH)]
+        h += 2
+        yt += 2
+    b = Block("mining_field", ents, (FIELD_W, h), ports)
+    rate_e = mining_rate(G, electric, resource)[1] if resource else 0.5
+    rate_b = mining_rate(G, burner, resource)[1] if resource else 0.25
+    b.info = {"slots": n_slots, "burner_slots": n_slots // 2, "resource": resource, "item": item,
+              "self_feed": self_feed, "rate_electric": rate_e, "rate_burner": rate_b, "tail_row": yt}
+    b.rates = {"power_kw": round(n_slots * (G.entity(electric).get("energy_usage_kw") or 90), 1)}
+    return b
+
+
+def smelter_column(n_pairs, gd=None, *, ore="iron-ore", furnace="stone-furnace", belt="transport-belt",
+                   pole="small-electric-pole", chest="wooden-chest", mixed_in=False) -> Block:
+    """Mirrored smelting column (PLANNER-v3 6.2), canonical: plate belts at x=0 and x=10 flow north out of the top
+    (ports (0, -1) and (10, -1)); pair i = furnaces at rows 2i..2i+1 (x 2-3 and 7-8); the middle belt (x=5) flows
+    north from the merge row L = 2n: ore side-loads onto its west (left) lane from port (4, L+1), coal onto its east
+    (right) lane from port (6, L+1). Input inserters (x 4, 6) and output inserters (x 1, 9) each come as a burner one
+    (in_b / out_b, until power) and the electric one on the same tile (in_e / out_e): a burner inserter that moves ore
+    AND coal only refuels when its furnace asks for coal, and dies holding ore when that comes too late (round-1
+    live finding), so from steam power on every column inserter is electric. Until the plate belts exist each output
+    inserter drops into a buffer chest on the plate-belt tile. Poles: (1, 4j+1), (9, 4j+1) and (4, 4j+1), one per
+    two pairs per inserter column. mixed_in: no merge; the middle belt runs on to row L+1 and takes a belt that
+    already carries ore and coal on separate lanes (mining_field(mixed=True)) straight from port (5, L+2); ports
+    [plate W, plate E, mixed in]. The input inserters pick from both lanes, so which lane holds the ore does not
+    matter."""
+    G = _geo(gd)
+    if n_pairs < 1:
+        raise ValueError("a smelter column needs at least one furnace pair")
+    L = 2 * n_pairs
+    ents = []
+    for i in range(n_pairs):
+        y = 2 * i
+        for side, (xp, xo, xf, xi, din, dout) in (("W", (0, 1, 2, 4, EAST, EAST)), ("E", (10, 9, 7, 6, WEST, WEST))):
+            ents.append(_put(G, furnace, xf, y, extra=_r("furnace", unit=i, side=side)))
+            ents.append(_put(G, "burner-inserter", xi, y, din, extra=_r("in_b", unit=i, side=side)))
+            ents.append(_put(G, "inserter", xi, y, din, extra=_r("in_e", unit=i, side=side)))
+            ents.append(_put(G, "burner-inserter", xo, y, dout, extra=_r("out_b", unit=i, side=side)))
+            ents.append(_put(G, "inserter", xo, y, dout, extra=_r("out_e", unit=i, side=side)))
+            ents.append(_put(G, chest, xp, y, extra=_r("buffer", unit=i, side=side)))
+    for r in range(0, L - 1):
+        for xp, side in ((0, "W"), (10, "E")):
+            ents.append(_put(G, belt, xp, r, NORTH, extra=_r("plate", row=r, side=side)))
+    if mixed_in:
+        ents += [_put(G, belt, 5, r, NORTH, extra=_r("mid", row=r)) for r in range(0, L + 2)]
+    else:
+        ents += [_put(G, belt, 5, r, NORTH, extra=_r("mid", row=r)) for r in range(0, L + 1)]
+        ents += [_put(G, belt, 4, L, EAST, extra=_r("merge", row=L)),
+                 _put(G, belt, 6, L, WEST, extra=_r("merge", row=L)),
+                 _put(G, belt, 5, L + 1, NORTH, extra=_r("merge", row=L + 1, note="straightener"))]
+    for j in range(math.ceil(n_pairs / 2)):
+        # out-inserter columns (x 1, 9) and the free row of the west in-inserter column (x 4): one pole there covers
+        # the input inserters of both sides (x 4 and 6) of two pairs
+        for xo, side in ((1, "W"), (9, "E"), (4, "C")):
+            ents.append(_put(G, pole, xo, 4 * j + 1, extra=_r("col_pole", unit=j, side=side)))
+    rec = smelt_recipe(G, ore, furnace)
+    ports = [Port("belt_out", rec["product"], 0, -1, NORTH), Port("belt_out", rec["product"], 10, -1, NORTH)]
+    if mixed_in:
+        ports.append(Port("belt_in", ore, 5, L + 2, NORTH))
+    else:
+        ports += [Port("belt_in", ore, 4, L + 1, NORTH, "left"), Port("belt_in", "coal", 6, L + 1, NORTH, "right")]
+    b = Block("smelter_column", ents, (COLUMN_W, L + 2), ports)
+    speed = G.entity(furnace).get("crafting_speed") or 1
+    per_furnace = speed / rec["energy"] * rec["out"]
+    b.info = {"pairs": n_pairs, "furnaces": 2 * n_pairs, "ore": ore, "product": rec["product"],
+              "per_furnace": per_furnace, "merge_row": L}
+    b.rates = {rec["product"]: _per_min(per_furnace * 2 * n_pairs), "coal": -fuel_per_min(G, furnace, "coal",
+                                                                                           2 * n_pairs)}
+    return b
+
+
+def mirror_y(block: Block) -> Block:
+    """Mirror a block top-bottom (north <-> south); east/west facing entities keep their direction. Only for blocks
+    whose entities are symmetric under the mirror (belts, inserters, boilers, steam engines, pipes, poles)."""
+    H = block.size[1]
+    flip = {NORTH: SOUTH, SOUTH: NORTH, EAST: EAST, WEST: WEST}
+    ents = [replace(e, y=H - e.y, direction=flip[e.direction]) for e in block.entities]
+    ports = [replace(p, y=H - 1 - p.y, direction=flip[p.direction] if p.kind != "pole" else 0) for p in block.ports]
+    return replace(block, entities=ents, ports=ports, info=dict(block.info, mirrored=True))
+
+
+def power_block(n_boilers=10, gd=None, *, boiler="boiler", engine="steam-engine", inserter="burner-inserter",
+                belt="transport-belt", pole="small-electric-pole", coal_end="water") -> Block:
+    """Steam block reserved at end-state size (PLANNER-v3 6.4), canonical with the water on the west: unit i = a
+    boiler (facing north) at x_i, two steam engines in series above it and a burner inserter below it that feeds it
+    from the coal belt; units pair around a 1-tile gap column (a pipe joins the pair's water at the boiler row and one
+    small pole at the engine joint powers the pair's 4 engines, pitch 7). The coal belt runs EAST from port (-1, yc)
+    next to the water input (fed from below, port (0, yc+1)), so unit 0 (west) is built first and later units only
+    extend the belt downstream. Burner inserters only: the block black-starts. Ports: pipe_in water at unit 0's
+    west connection, belt_in coal."""
+    G = _geo(gd)
+    ew, eh = G.size(engine)
+    bw, bh = G.size(boiler)
+    yb, yi = 2 * eh, 2 * eh + bh
+    yc = yi + 1
+    xs = [(i // 2) * (2 * bw + 1) + (i % 2) * (bw + 1) for i in range(n_boilers)]
+    ents = []
+    for i, x in enumerate(xs):
+        ents.append(_put(G, boiler, x, yb, NORTH, extra=_r("boiler", unit=i)))
+        ents.append(_put(G, engine, x, eh, NORTH, extra=_r("engine", unit=i)))
+        ents.append(_put(G, engine, x, 0, NORTH, extra=_r("engine", unit=i)))
+        ents.append(_put(G, inserter, x + bw // 2, yi, SOUTH, extra=_r("boiler_ins", unit=i)))
+        if i % 2 == 1:
+            ents.append(_put(G, "pipe", x - 1, yb + bh - 1, extra=_r("pipe", unit=i)))
+            ents.append(_put(G, pole, x - 1, eh - 1, extra=_r("power_pole", unit=i - 1)))
+    if n_boilers % 2:
+        ents.append(_put(G, pole, xs[-1] + bw, eh - 1, extra=_r("power_pole", unit=n_boilers - 1)))
+    w = xs[-1] + bw + (n_boilers % 2)
+    for x in range(w):
+        ents.append(_put(G, belt, x, yc, EAST if coal_end == "water" else WEST, extra=_r("boiler_belt", row=x)))
+    first = ents[0]
+    wc = [c for c in G.fluid_connections(boiler, first.x, first.y, NORTH) if c[2] == WEST][0]
+    # coal_end "water": the coal comes in from below (the land side) at the water end of the belt row (the first
+    # belt turns east); "far": it comes in at the far end and the belt runs back toward the water (all of it at S2)
+    coal = Port("belt_in", "coal", 0, yc + 1, NORTH) if coal_end == "water" else Port("belt_in", "coal", w, yc, WEST)
+    ports = [Port("pipe_in", "water", wc[0], wc[1], EAST), coal]
+    b = Block("power_block", ents, (w, yc + 1), ports)
+    b.info = {"boilers": n_boilers, "unit_x": xs, "boiler_kw": G.entity(boiler).get("max_energy_usage_kw") or 1800,
+              "engine_kw": G.entity(engine).get("max_energy_production_kw") or 900}
+    return b
+
+
+SCI_S = 7     # x of the science belt ("spine") in science_block's local coordinates
+
+
+def science_block(gd=None, *, n_red_res=8, labs_per_side=5, belt="transport-belt") -> Block:
+    """Red science + labs on one science belt, with the green block's ground reserved (PLANNER-v3 6.5-6.7).
+    Canonical (north up): the spine (x=7) flows north from the lowest red output inserter to the labs. West of it the
+    red column: mixed belt (x=1, copper on the right lane, gears on the left) | input inserters (x=2) | AM1 (x 3-5,
+    red unit i at rows 16+3i..) | output inserters (x=6) dropping red packs on the spine's east (right) lane. Below
+    it the gear AM1 (rows Yg+1..Yg+3) takes iron from the iron belt end (x=7, two inserters) and puts gears on the
+    mixed belt; copper side-loads onto the mixed belt at its start (x=1, row Yg+4) from port (2, Yg+5). Iron port:
+    (7, Yg+5). East of the spine: the green block (green output inserters at x=8 drop on the spine's west (left)
+    lane; reserved, PLANNER-v3 6.6). Labs: rows 0..3*labs_per_side-1, west (x 3-5) and east (x 9-11) of the spine,
+    fed by inserters at x=6 / x=8. info["reserve"] = local rects kept free for the green block."""
+    G = _geo(gd)
+    S = SCI_S
+    nl = labs_per_side
+    y0 = 3 * nl + 1                  # first red row (one gap row under the labs)
+    Yg = y0 + 3 * n_red_res          # gap row above the gear AM
+    ents = []
+    for j in range(nl):              # lab j: rows 3j..3j+2; built from the bottom (j = nl-1) up
+        for side, xl, xi, d in (("W", S - 4, S - 1, EAST), ("E", S + 2, S + 1, WEST)):
+            ents.append(_put(G, "lab", xl, 3 * j, extra=_r("lab", unit=j, side=side)))
+            ents.append(_put(G, "inserter", xi, 3 * j + 1, d, extra=_r("lab_ins", unit=j, side=side)))
+    for i in range(n_red_res):       # red unit i: rows y0+3i..; built from the bottom (i = n_red_res-1) up
+        y = y0 + 3 * i
+        ents.append(_put(G, "assembling-machine-1", S - 4, y, recipe="automation-science-pack",
+                         extra=_r("red_am", unit=i)))
+        ents.append(_put(G, "inserter", S - 5, y + 1, WEST, extra=_r("red_in", unit=i)))
+        ents.append(_put(G, "inserter", S - 1, y + 1, WEST, extra=_r("red_out", unit=i)))
+    ents.append(_put(G, "assembling-machine-1", S - 4, Yg + 1, recipe="iron-gear-wheel", extra=_r("gear_am")))
+    ents.append(_put(G, "inserter", S - 5, Yg + 2, EAST, extra=_r("gear_out")))
+    ents += [_put(G, "inserter", S - 1, Yg + r, EAST, extra=_r("gear_in", unit=r)) for r in (1, 2)]
+    ents += [_put(G, belt, S, Yg + r, NORTH, extra=_r("fe_end", row=Yg + r)) for r in (1, 2, 3, 4)]
+    ents.append(_put(G, belt, S - 5, Yg + 4, WEST, extra=_r("cu_load", row=Yg + 4)))
+    ents.append(_put(G, belt, S - 6, Yg + 5, NORTH, extra=_r("blocker", row=Yg + 5)))
+    ents += [_put(G, belt, S - 6, r, NORTH, extra=_r("mixed", row=r)) for r in range(y0 + 1, Yg + 5)]
+    ents += [_put(G, belt, S, r, NORTH, extra=_r("spine", row=r)) for r in range(1, Yg - 1)]
+    ports = [Port("belt_in", "copper-plate", S - 5, Yg + 5, NORTH), Port("belt_in", "iron-plate", S, Yg + 5, NORTH)]
+    gents, gports = _green_part(G, S, y0, Yg, belt)
+    ents += gents
+    ports += gports
+    b = Block("science_block", ents, (S + 17, Yg + 6), ports)
+    b.info = {"S": S, "y0": y0, "Yg": Yg, "n_red_res": n_red_res, "labs_per_side": nl,
+              "reserve": [("green", (S + 1, y0, S + 17, Yg + 6))], "green_rows": GREEN_N}
+    return b
+
+
+GREEN_N = 6          # green-pack assemblers: 6 x (1 pack / 12 s at AM1 speed 0.5) = 0.5 green/s
+
+
+def _green_part(G, S, y0, Yg, belt="transport-belt"):
+    """The green block (PLANNER-v3 6.6) east of the spine, inside the ground the science block reserves for it.
+    Canonical columns (x relative to the spine S): S+1 green output inserters (drop on the spine's WEST lane; red
+    drops on the east one) | S+2..S+4 six logistic-science-pack AM1 (rows y0+3i) | S+5 their input inserters | S+6
+    the MIX belt (north; transport belts side-loaded onto its east lane at the bottom, inserters dropped on its west
+    lane: separate lanes, so neither item can block the other) | S+7 producer output inserters | S+8..S+10 the
+    producer stack, one AM1 each, direct insertion between neighbours (pitch 4): copper cable (y0+8) -> electronic
+    circuit (y0+12) -> inserter (y0+16) <- gear (y0+20) -> transport belt (y0+24) | S+11 producer input inserters
+    | S+12 the FEED belt (north; iron side-loaded onto its west lane, copper onto its east lane). Ports at the
+    bottom row (Yg+5): iron (S+10), copper (S+13). Rates at 0.5 green/s: 2.75 iron/s, 0.75 copper/s; cable 1.5/s
+    over two inserters (an inserter moves ~0.83/s), gears 0.75/s (two iron inserters into the gear AM)."""
+    if Yg + 5 < y0 + 29:
+        raise ValueError("the green block needs n_red_res >= 8 (30 rows)")
+    am = "assembling-machine-1"
+    ins = "inserter"
+    E = []
+
+    def put(name, x, y, d=NORTH, role="", recipe=None, **kw):
+        E.append(_put(G, name, x, y, d, recipe=recipe, extra=_r(role, **kw)))
+    for i in range(GREEN_N):
+        y = y0 + 3 * i
+        put(am, S + 2, y, recipe="logistic-science-pack", role="green_am", unit=i)
+        put(ins, S + 1, y + 1, EAST, role="green_out", unit=i)
+        put(ins, S + 5, y + 1, EAST, role="green_in", unit=i)
+    rows = {"copper-cable": y0 + 8, "electronic-circuit": y0 + 12, "inserter": y0 + 16, "iron-gear-wheel": y0 + 20,
+            "transport-belt": y0 + 24}
+    for rec, y in rows.items():
+        put(am, S + 8, y, recipe=rec, role="prod_am", unit=rec)
+    yk, yc, yi, yg, yt = (rows[r] for r in ("copper-cable", "electronic-circuit", "inserter", "iron-gear-wheel",
+                                            "transport-belt"))
+    # direct insertion (inserter direction = the side it picks from)
+    put(ins, S + 8, yk + 3, NORTH, role="prod_link", unit="cable")      # cable -> circuit (x2: 1.5 cable/s)
+    put(ins, S + 9, yk + 3, NORTH, role="prod_link", unit="cable")
+    put(ins, S + 9, yc + 3, NORTH, role="prod_link", unit="circuit")    # circuit -> inserter
+    put(ins, S + 9, yi + 3, SOUTH, role="prod_link", unit="gear_up")    # gear -> inserter (picks from the south)
+    put(ins, S + 9, yg + 3, NORTH, role="prod_link", unit="gear_down")  # gear -> belt
+    # plates from the feed belt (x S+12) into each producer
+    for y in (yk + 1, yc + 1, yi + 1, yg, yg + 1, yt + 1):
+        put(ins, S + 11, y, EAST, role="prod_in", row=y)
+    # outputs onto the MIX belt: inserters dropped from the east (west lane), belts side-loaded from the east
+    put(ins, S + 7, yi + 1, EAST, role="prod_out", unit="inserter")
+    put(ins, S + 8, yt + 3, NORTH, role="prod_out", unit="transport-belt")
+    put(belt, S + 8, yt + 4, WEST, role="mix_load", row=yt + 4)
+    put(belt, S + 7, yt + 4, WEST, role="mix_load", row=yt + 4)
+    for r in range(y0, yt + 6):
+        put(belt, S + 6, r, NORTH, role="mix" if r < yt + 5 else "mix_block", row=r)
+    # FEED: iron from the west, copper from the east, both side-loaded onto the tile above a blocker
+    for r in range(yk + 1, yt + 6):
+        put(belt, S + 12, r, NORTH, role="feed" if r < yt + 5 else "feed_block", row=r)
+    put(belt, S + 10, yt + 4, EAST, role="feed_in", row=yt + 4)         # iron: port (S+10, Yg+5) below it
+    put(belt, S + 11, yt + 4, EAST, role="feed_in", row=yt + 4)
+    put(belt, S + 13, yt + 4, WEST, role="feed_in", row=yt + 4)         # copper: port (S+13, Yg+5) below it
+    ports = [Port("belt_in", "iron-plate", S + 10, Yg + 5, NORTH), Port("belt_in", "copper-plate", S + 13, Yg + 5, NORTH)]
+    return E, ports

@@ -192,11 +192,13 @@ def walk_s(a, b) -> float:
 
 
 def simulate(steps, stock: dict, gd, H: float = H_DEFAULT, start=None, existing_rates=None, target=None,
-             round_share: float = 0.0, horizon=HORIZON, dt=DT) -> dict:
+             round_share: float = 0.0, horizon=HORIZON, dt=DT, craft_parallel: bool = False) -> dict:
     """Discrete simulation (dt minutes) of the helper building `steps` in order from `stock`.
     target: {item: per_min} the plan's rate goal (eta.target). round_share: share of the helper's time spent on the
-    logistics round once the first step runs (carrying plates/coal between sites). -> {first_plates, target,
-    complete (minutes or None beyond the horizon), timeline: [(minute, step name)], gathered: {raw: n}}."""
+    logistics round once the first step runs (carrying plates/coal between sites). craft_parallel: hand crafting
+    runs while the character walks and places (the engine's crafting queue does), so a step takes the longer of the
+    two instead of their sum. -> {first_plates, target, complete (minutes or None beyond the horizon), timeline:
+    [(minute, step name)], gathered: {raw: n}, craft_min}."""
     have = {k: float(v) for k, v in (stock or {}).items() if v > 0}
     rates = {}                       # plan production (items/min) once active
     burns = {}
@@ -210,6 +212,7 @@ def simulate(steps, stock: dict, gd, H: float = H_DEFAULT, start=None, existing_
     started = False
 
     fuel = [0.0]                     # coal inside the running burners (their start fuel)
+    craft_total = [0.0]
 
     def produce(dt_):
         # burners run on their own fuel first, then on coal in stock; production scales with the coal supply
@@ -257,7 +260,9 @@ def simulate(steps, stock: dict, gd, H: float = H_DEFAULT, start=None, existing_
         c = cover(s.items, have, gd)
         if c.ok:
             have = dict(c.left)
-            dur = (c.craft_s + PLACE_S * s.n_entities + walk_s(pos, s.site) + s.dismantle_s + s.extra_s) / 60.0
+            work = PLACE_S * s.n_entities + walk_s(pos, s.site) + s.dismantle_s
+            craft_total[0] += c.craft_s
+            dur = ((max(c.craft_s, work) if craft_parallel else c.craft_s + work) + s.extra_s) / 60.0
             pos = s.site or pos
             for k, v in (s.salvage or {}).items():
                 _add(have, k, v)
@@ -293,7 +298,7 @@ def simulate(steps, stock: dict, gd, H: float = H_DEFAULT, start=None, existing_
         return None if v is None or v > horizon else round(v, 1)
     return {"first_plates": m(first), "target": m(tgt), "complete": m(done_t), "timeline": timeline,
             "gathered": {k: round(v) for k, v in gathered.items()}, "assumes": "helper only, player not counted",
-            "helper_rate": H}
+            "helper_rate": H, "craft_min": round(craft_total[0] / 60.0, 1)}
 
 
 def helper_rate(stats: dict | None) -> float:

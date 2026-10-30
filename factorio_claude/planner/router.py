@@ -365,7 +365,7 @@ def _check_path(steps):
     return True
 
 
-def _make_walk(grid: Grid, avoid, clear_cost, ore_cost):
+def _make_walk(grid: Grid, avoid, clear_cost, ore_cost, tile_cost=None):
     def walkable(x, y):
         st = grid.state_at(x, y)
         return st != BLOCKED and (x, y) not in avoid
@@ -376,6 +376,8 @@ def _make_walk(grid: Grid, avoid, clear_cost, ore_cost):
             c += clear_cost
         if ore_cost and grid.resource(x, y):
             c += ore_cost
+        if tile_cost is not None and grid.in_bounds(x, y):
+            c += float(tile_cost[y - grid.y0, x - grid.x0])
         return c
     return walkable, step_cost
 
@@ -403,8 +405,11 @@ def _occupy(grid, ents, prefix):
 # --------------------------------------------------------------------------------------------------------------
 def route_belt(grid: Grid, gd, start, goal, belt: str = "transport-belt", allow_underground=None, others=None,
                tag: str = "route", turn_cost: float = TURN, clear_cost: float = CLEAR, ore_cost: float = ORE,
-               underground_cost: float = UNDERGROUND, max_nodes: int = 400_000) -> list[PE]:
+               underground_cost: float = UNDERGROUND, max_nodes: int = 400_000, tile_cost=None,
+               occupy: bool = True) -> list[PE]:
     """Belt from port `start` to port `goal` -> [PE] (belts, underground pairs, maybe a lane blocker belt).
+    tile_cost: optional array over the grid ([y - y0, x - x0]) added to every step onto that tile (negotiated
+    routing: congestion and history costs). occupy=False leaves the grid unmarked.
 
     The goal is side-loaded when its tile already holds a belt (existing, earlier route, or a belt in `others`):
     the route ends next to it pointing in (lane "left"/"right" picks the side, else any side or from behind).
@@ -457,12 +462,13 @@ def route_belt(grid: Grid, gd, start, goal, belt: str = "transport-belt", allow_
         vx, vy = VEC[gdir]
         terminals[(G[0] + vx, G[1] + vy, gdir)] = 0.0
     avoid.discard(S)  # the block's own output belt feeds the start tile
-    walkable, step_cost = _make_walk(grid, avoid, clear_cost, ore_cost)
+    walkable, step_cost = _make_walk(grid, avoid, clear_cost, ore_cost, tile_cost)
     if S == G and not goal_is_belt and not extra_ents:
         if sd == rev(gdir):
             raise NoRoute("start and goal on the same tile face each other")
         ents = [_pe(belt, S[0], S[1], gdir)]
-        _occupy(grid, ents, tag)
+        if occupy:
+            _occupy(grid, ents, tag)
         return ents
 
     jump = None
@@ -492,7 +498,8 @@ def route_belt(grid: Grid, gd, start, goal, belt: str = "transport-belt", allow_
             d = _dir_between(t, X)
             ents += [_pe(ug[0], t[0], t[1], d, {"type": "input"}), _pe(ug[0], X[0], X[1], d, {"type": "output"})]
     ents += extra_ents
-    _occupy(grid, ents, tag)
+    if occupy:
+        _occupy(grid, ents, tag)
     return ents
 
 

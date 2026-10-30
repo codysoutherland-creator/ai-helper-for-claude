@@ -623,6 +623,12 @@ class _Validator:
             return set()
         return (items & ok) | ({"*"} if "*" in items else set())
 
+    def _holds_items(self, r) -> bool:
+        """True when an inserter can put items into r (container, crafter, lab, burner fuel slot, turret ...)."""
+        if r.type in CONTAINER_TYPES | CRAFTER_TYPES | BELT_TYPES | {"lab", "ammo-turret", "rocket-silo"}:
+            return True
+        return bool(self._burner_fuel(r))
+
     def offers(self, r) -> set:
         """Items an inserter can take out of this entity."""
         if r is None:
@@ -689,7 +695,10 @@ class _Validator:
         if not self.ex.get("connect_existing"):
             for s, sn, d, dn, mover, kind in self.links:
                 if mover.existing:
-                    hit = [x for x in ((sn.r if sn is not None else None), d) if x is not None and not x.existing]
+                    # only targets that hold items count: an existing inserter whose drop point lands on a planned
+                    # pole (or any entity without an item inventory) moves nothing into the plan
+                    dst = d if d is not None and (dn is not None or self._holds_items(d)) else None
+                    hit = [x for x in ((sn.r if sn is not None else None), dst) if x is not None and not x.existing]
                     if hit:
                         self.err("existing_link", hit[0], f"existing {mover.label} reaches into planned "
                                                           f"{hit[0].label}: foreign items would mix in")

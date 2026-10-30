@@ -480,6 +480,16 @@ end
 -- {type="craft", recipe, count}
 function tasks.craft(a, t)
   local c = a.entity
+  if t.started and c.crafting_queue_size > 0 and c.get_main_inventory().count_empty_stacks() == 0 then
+    -- a hand craft whose product does not fit waits for ever: give up (the caller stashes, then plans again)
+    t.full_since = t.full_since or game.tick
+    if game.tick - t.full_since > 600 then
+      c.cancel_crafting{index = 1, count = c.crafting_queue[1] and c.crafting_queue[1].count or 1}
+      return nil, "inventory full while crafting " .. t.recipe
+    end
+  else
+    t.full_since = nil
+  end
   if not t.started then
     local n = c.begin_crafting{recipe = t.recipe, count = t.count or 1, silent = true}
     if n == 0 then return nil, "can't craft " .. t.recipe .. " (missing ingredients or not unlocked)" end
@@ -680,6 +690,111 @@ local function plan_reserved(p)
   return false
 end
 
+-- a tile any plan (proposed, waiting or applied) puts an entity on, with a 1-tile margin
+local function plan_tile(x, y)
+  for _, pl in pairs(storage.plans or {}) do
+    local bb = pl.bbox
+    if bb and x >= bb[1] - 1 and x <= bb[3] + 1 and y >= bb[2] - 1 and y <= bb[4] + 1 then
+      for _, e in ipairs(pl.entities or {}) do
+        local proto = prototypes.entity[e[1]]
+        local w = proto and proto.tile_width or 1
+        local h = proto and proto.tile_height or 1
+        if math.abs(e[2] - x) < w / 2 + 1.5 and math.abs(e[3] - y) < h / 2 + 1.5 then return true end
+      end
+    end
+  end
+  return false
+end
+
+-- A storage chest for the salvage the helper carries when its inventory is too full to fetch materials: placed near
+-- it on free ground that no plan uses (no ore, no ghost, nothing planned or reserved within a tile), then everything
+-- it carries that the remaining ghosts don't need (salvaged machines, ore, ...) goes in. -> task list or nil
+local KEEP = {coal = true, wood = true, stone = true, ["iron-plate"] = true, ["copper-plate"] = true,
+  ["iron-gear-wheel"] = true, ["electronic-circuit"] = true, ["copper-cable"] = true, ["steel-plate"] = true}
+-- what of a KEEP item stays in the helper's inventory when it stashes (round 3 live: it took apart 17 plate chests
+-- full of plates at S5 and stopped, its inventory full of plates, crafting the last 12 belts forever)
+local KEEP_MAX = {["iron-plate"] = 600, ["copper-plate"] = 400, coal = 200, stone = 200, wood = 100}
+local STASH_CHESTS = 4
+local function stash_plan(a, need)
+  local c = a.entity
+  local chest
+  for _, n in ipairs({"iron-chest", "wooden-chest"}) do
+    if c.get_item_count(n) > 0 then chest = n; break end
+  end
+  local craft
+  if not chest then
+    for _, n in ipairs({"iron-chest", "wooden-chest"}) do
+      local r = c.force.recipes[n]
+      if r and r.enabled then
+        local ok = true
+        for _, ing in pairs(r.ingredients) do
+          if c.get_item_count(ing.name) < ing.amount then ok = false end
+        end
+        if ok then chest, craft = n, n; break end
+      end
+    end
+  end
+  if not chest then return nil end
+  local s = c.surface
+  local cx, cy = math.floor(c.position.x), math.floor(c.position.y)
+  local spot
+  for r = 2, 30 do
+    for i = -r, r do
+      for _, d in ipairs{{i, -r}, {i, r}, {-r, i}, {r, i}} do
+        local p = {x = cx + d[1] + 0.5, y = cy + d[2] + 0.5}
+        if s.can_place_entity{name = chest, position = p, force = c.force,
+              build_check_type = defines.build_check_type.manual}
+            and s.count_entities_filtered{area = {{p.x - 1.5, p.y - 1.5}, {p.x + 1.5, p.y + 1.5}},
+              type = {"entity-ghost", "resource", "character"}, limit = 1} == 0
+            and not plan_reserved(p) and not plan_tile(p.x, p.y) then
+          spot = p
+          break
+        end
+      end
+      if spot then break end
+    end
+    if spot then break end
+  end
+  if not spot then return nil end
+  local list = {}
+  local inv = c.get_main_inventory()
+  -- what goes in: everything the remaining ghosts don't need, and of the materials it keeps the part above KEEP_MAX
+  local store, stacks = {}, 0
+  for _, it in pairs(inv.get_contents()) do
+    local n = it.name
+    if not store[n] and not need[n] and n ~= chest then
+      local have = c.get_item_count(n)
+      local keep = KEEP[n] and (KEEP_MAX[n] or 200) or 0
+      if have > keep then
+        store[n] = keep
+        stacks = stacks + math.ceil((have - keep) / prototypes.item[n].stack_size)
+      end
+    end
+  end
+  if stacks == 0 then return nil end
+  local size = (prototypes.entity[chest].get_inventory_size(defines.inventory.chest)) or 16
+  local n_chests = math.min(STASH_CHESTS, math.ceil(stacks / size))
+  if not craft then n_chests = math.min(n_chests, c.get_item_count(chest)) end
+  local spots = {spot}
+  for _ = 2, n_chests do      -- the next chests in a row next to the first (free, unplanned tiles only)
+    local last = spots[#spots]
+    local q = {x = last.x + 1, y = last.y}
+    if not (s.can_place_entity{name = chest, position = q, force = c.force,
+              build_check_type = defines.build_check_type.manual} and not plan_reserved(q) and
+            not plan_tile(q.x, q.y)) then break end
+    spots[#spots + 1] = q
+  end
+  for _, sp in ipairs(spots) do
+    if craft then list[#list + 1] = {type = "craft", recipe = craft, count = 1} end
+    list[#list + 1] = {type = "place", name = chest, x = sp.x, y = sp.y}
+    for n, keep in pairs(store) do
+      list[#list + 1] = {type = "insert", x = sp.x, y = sp.y, name = chest, item = n, keep = keep, soft = true}
+    end
+  end
+  alog(a, "inventory full: storing salvage in " .. #spots .. " " .. chest .. " at " .. spot.x .. "," .. spot.y)
+  return list
+end
+
 -- Free ground for a new 2x2 furnace near `center`: not on ore, ghosts or anything else (1-tile margin
 -- so it never blocks a planned layout or its own access), away from spots already reserved.
 local function free_furnace_spot(c, center, reserved)
@@ -694,6 +809,9 @@ local function free_furnace_spot(c, center, reserved)
           if math.abs(q.x - p.x) < 4 and math.abs(q.y - p.y) < 4 then ok = false; break end
         end
         if ok and plan_reserved(p) then ok = false end
+        -- nor on anything a plan (also a later, waiting stage) will build there: the helper's own furnace once stood
+        -- on the next stage's coal belt and that stage could not be placed
+        if ok and plan_tile(p.x, p.y) then ok = false end
         if ok and s.can_place_entity{name = SMELTER, position = p, force = c.force,
             build_check_type = defines.build_check_type.manual}
             and s.count_entities_filtered{area = {{p.x - 2, p.y - 2}, {p.x + 2, p.y + 2}}, type = "character",
@@ -1156,7 +1274,7 @@ function tasks.build_ghosts(a, t)
   local nxt = {type = "build_ghosts", x = center.x, y = center.y, radius = radius, player = t.player, built = built,
     stall = t.stall or 0, left = #ghosts, blocked = blocked, plan = t.plan, fuel = t.fuel, coal_from = t.coal_from,
     order = t.order, skip_boxes = t.skip_boxes, fuel_try = t.fuel_try, fuel_at = t.fuel_at, cur_box = box_i,
-    take_from = t.take_from}
+    take_from = t.take_from, stashes = t.stashes}
   local site_key = box_i or 0
   local sub, used, need, rank, cleared = {}, {}, {}, {}, {}
   for i = 1, math.min(#ghosts, ROUND_GHOSTS) do
@@ -1195,9 +1313,12 @@ function tasks.build_ghosts(a, t)
 
   if #sub > 0 then
     -- start fuel: right before placing a site's burners, get the coal they start on (the plan's coal chests first,
-    -- else mining); fetched now and not earlier, so the helper's own hand-smelting can't burn it first
-    if t.fuel and t.fuel_try ~= site_key then
-      nxt.fuel_try = site_key
+    -- else mining); fetched now and not earlier, so the helper's own hand-smelting can't burn it first. Checked for
+    -- every batch (not once per site): a site's first batch may hold no burner, and a coal field placed without its
+    -- start coal never starts (round-2 live finding)
+    local fkey = tostring(site_key) .. "#" .. built
+    if t.fuel and t.fuel_try ~= fkey then
+      nxt.fuel_try = fkey
       local fneed = 0
       for _, st in ipairs(sub) do
         local proto = st.type == "place" and prototypes.entity[st.name]
@@ -1233,6 +1354,16 @@ function tasks.build_ghosts(a, t)
   if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
     player = nil
   end
+  if c.get_main_inventory().count_empty_stacks() < 6 and (t.stashes or 0) < 3 then
+    -- nearly full (e.g. the plates of the plate chests a stage took apart): store the surplus first, then plan
+    local list = stash_plan(a, need)
+    if list then
+      nxt.stashes = (t.stashes or 0) + 1
+      list[#list + 1] = nxt
+      for i = #list, 1, -1 do table.insert(a.queue, 1, list[i]) end
+      return "done"
+    end
+  end
   local P = new_planner(c, center, player, t.take_from)  -- a later stage: the previous stage's chests first
   local items = {}
   for item in pairs(need) do items[#items + 1] = item end
@@ -1254,6 +1385,17 @@ function tasks.build_ghosts(a, t)
     if n < need[item] then full = n == 0; break end  -- inventory is the limit; the next round takes the rest
   end
 
+  if #P.tasks == 0 and full and (t.stashes or 0) < 3 then
+    -- too full to fetch: store the salvage it carries in a chest of its own first (round-2 live finding: after the
+    -- electric-drill swap the burner drills it took apart filled its inventory and the build stopped)
+    local list = stash_plan(a, need)
+    if list then
+      nxt.stashes = (t.stashes or 0) + 1
+      list[#list + 1] = nxt
+      for i = #list, 1, -1 do table.insert(a.queue, 1, list[i]) end
+      return "done"
+    end
+  end
   if #P.tasks == 0 and full then
     local msg = "Built " .. built .. ". " .. #ghosts .. " ghosts left, but my inventory is too full to fetch materials."
       .. " Take my items (Give all) and press Build ghosts again."
@@ -1372,7 +1514,11 @@ function tasks.insert(a, t)
   c.walking_state = {walking = false}
   local have = c.get_item_count(t.item)
   local want = math.min(t.count or have, have)
-  if want <= 0 then return nil, "no " .. t.item end
+  if t.keep then want = math.min(want, have - t.keep) end   -- a stash: only what is above what the helper keeps
+  if want <= 0 then
+    if t.soft then return "done" end
+    return nil, "no " .. t.item
+  end
   local n = e.insert{name = t.item, count = want}
   if n > 0 then c.remove_item{name = t.item, count = n} end
   alog(a, "inserted " .. n .. " " .. t.item .. " into " .. e.name)
@@ -1919,6 +2065,15 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id)
       take_from = pl and pl.take_from or nil}
   end
   local hand = fuel_at and #fuel_at > 0
+  -- primed entries (r[4]) are planner v3 coal-field burners: started and restarted, not hand-fed
+  local hand_n, primed_n = 0, 0
+  for _, r in ipairs(fuel_at or {}) do
+    if r[4] then primed_n = primed_n + 1 else hand_n = hand_n + 1 end
+  end
+  local round_txt = hand_n > 0 and (", then keeps the " .. hand_n .. " hand-fed burners fuelled with coal every few " ..
+      "minutes" .. (primed_n > 0 and " and the coal fields running." or ".")) or
+    (primed_n > 0 and (", then checks every few minutes that the coal fields keep running (everything else gets " ..
+      "its coal by belt).") or ".")
   if hand and plan_id and (what == "build" or what == "round") then
     -- the plan's logistics round: keeps its hand-fed burners fuelled (coal from its coal chests) until a new order
     list[#list + 1] = {type = "round", at = fuel_at, coal_from = coal_from, player = pi, plan = plan_id}
@@ -1951,11 +2106,15 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id)
     return pre .. "The helper is " .. (took > 0 and "taking the coal out of the listed idle machines, " or "") ..
       (dismantle and "taking apart the listed old builds, then " or "") ..
       "building " .. (label or "it") .. ", fetching or crafting what it needs" ..
-      (busy and " after its current task" or "") ..
-      (hand and ", then keeps the hand-fed burners fuelled with coal every few minutes." or ".")
+      (busy and " after its current task" or "") .. round_txt
   end
   if what == "round" then
-    return pre .. "The helper keeps the plan's hand-fed burners fuelled every few minutes (any new order stops it)."
+    if hand_n == 0 then
+      return pre .. "The helper checks every few minutes that the plan's coal fields keep running (any new order " ..
+        "stops it); everything else gets its coal by belt."
+    end
+    return pre .. "The helper keeps the plan's " .. hand_n .. " hand-fed burners fuelled every few minutes (any new " ..
+      "order stops it)."
   end
   return pre .. "The helper is topping up the hand-fed drills and inserters with coal" ..
     (busy and " after its current task" or "") .. "."

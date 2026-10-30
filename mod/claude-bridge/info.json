@@ -1,6 +1,6 @@
 {
   "name": "claude-bridge",
-  "version": "0.4.1",
+  "version": "0.5.0",
   "title": "AI Helper (for Claude)",
   "author": "codysoutherland-creator",
   "description": "Unofficial (not affiliated with or endorsed by Anthropic). Free in-game helper character, base foreman and blueprint generator (buttons + chat keywords), plus an Ask Claude link to your own Claude Code companion over a local UDP link.",

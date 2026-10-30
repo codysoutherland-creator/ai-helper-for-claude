@@ -75,40 +75,42 @@ Chat works too: `@claude help` lists the free keyword commands (`@claude wood 20
 2. Cost gate: "This looks like a planning job (≈ $0.05–0.30). Run it?" Click **Run** (or `@claude run`). About
    $0.03 and under a minute.
 3. Claude runs the planner once. It reads the map **and your actual state**: what you and the helper carry, nearby
-   chests, your machines (working or idle), production and research. It proposes up to 4 variants in the **Plans**
-   tab, each a different build, and every one has already passed the validator:
-   - **Quick start**: burner drills straight into stone furnaces on the edge of the iron patch. No belts. Iron plates
-     in minutes, cheapest bill.
-   - **Balanced**: iron and copper smelted on their own patches from the start.
-   - **Long-term**: a central smelting hub with a bus, but only when the ore belts to it are short. On a map with
-     far-apart patches it becomes "grow on site" (twice the smelting on the patches) and says why the hub was
-     rejected (for example "1226 belt tiles, longest run 290").
-   - **Rebuild** (only when it clearly pays off): takes apart or converts specific old builds of yours that sit
-     idle or in the way. It lists exactly what it removes (count, position, reason) and the net gain. Saying "tidy
-     up my old stuff" lowers the bar. It never replaces the whole base by default and never touches labs or your own
-     ghosts.
+   chests, your machines (working or idle), production and research. It designs the **whole starter base first**
+   (one master plan per variant), all the way to automated red and green science, and only then splits it into
+   stages. Every stage only adds to that same layout or swaps something in place:
+   - **S0** burner iron + coal, **S1** burner copper. The burner drills already sit in the slots the electric drills
+     will take, on the belts the finished base uses.
+   - **S2** steam power and labs. Every inserter of the smelting columns becomes an electric one in place, so from
+     here on the base runs while the helper does nothing.
+   - **S3** automated red science (after the Automation research; the helper hand-makes the 10 packs for it once).
+   - **S4** electric drills swapped into the burner drills' slots, poles on the gap rows reserved for them from day
+     one (after Electric mining drill, researched with the packs S3 makes). The burner drills come back to the helper.
+   - **S5** automated green science: cables, circuits, gears, inserters and belts made by their own assemblers.
+   - A coal belt longer than 120 tiles becomes its own short stage (S0b / S1b); until it is built the helper keeps
+     that line fuelled.
 
-   Every card shows the **bill** (what it needs, what you have, salvage from removed builds, what is short), the
-   **ETA** (minutes to first plates and to full rate, from a model of what the helper really does: gathering,
-   building site by site, carrying coal), plates/min, belt length (total and longest run), footprint, a one-line
-   trade-off and quality warnings (bill far beyond what you can get soon, very long belts, hub far from the iron,
-   water ignored). Before building anything new it reuses what you have, for example by taking the coal out of idle
-   machines to start the new burners.
-4. **Preview** a variant (overlay in the world and on the map; another Preview hides it). Entities a Rebuild variant
-   would remove are drawn in red. Then **Approve** one. Approving marks exactly the listed entities for removal
-   (Reject or Dismiss cancels the marks that are left), places tagged ghosts, marks trees/rocks in the way, and
-   starts the helper (spawned if needed). The helper takes the listed coal, dismantles the listed builds (their items
-   go to its inventory), then builds everything. It takes materials from nearby chests, then your inventory (mod
-   setting), and crafts, smelts or mines the rest.
-   The other variants on the same ground are greyed out ("Replaced by ..."). Use Remove its ghosts to switch.
-5. The burner (bootstrap) stage has no coal belts. Its coal drills fill chests, and the helper carries coal to the
-   burners every few minutes until you give it another order (**Helper: refuel** or `plan_helper(id, "round")`
-   restarts the round). The card says how much of the helper's time that takes; without the helper the burners run
-   dry in about 20 minutes.
-6. Every variant carries a checked **stage 2** on the same footprint: a hand-fed steam engine at the nearest water,
-   poles to your idle labs (powered where they stand) or new labs, copper pairs if stage 1 had none, with its own bill
-   and when red science research can start. Ask Claude for it once stage 1 runs, then approve it in the Plans tab.
-   Red science packs are hand-crafted (you or the helper) in this release.
+   The variants differ in topology: **Central hub** (furnaces and science in one block; each ore field sends its ore
+   and coal on one belt, and the coal belt out to the field keeps carrying the furnaces' coal after the electric
+   drills) and **Smelt at each patch** (furnaces next to every ore field, first plates soonest; one plate belt per
+   metal to the science, split for green science at S5). Nothing a stage builds is ever taken up again: the only
+   removals are in-place swaps. Variants whose belts would wind far around are not offered; the recommended one says
+   why (belt tiles, minutes to red science and to the first plates). The card is five short lines: the trade-off, the
+   stage to build now ("ready in" minutes, plates/min, what is short, belt tiles of the whole plan), the roadmap with
+   the minutes from now until each stage is built, what of yours it touches and from which stage the base runs on its
+   own, and the one exception (Automation's 10 red packs are hand-made: no assembler exists before it). Nothing of
+   yours is taken apart unless you allow it (`allow_removal`, off by default); a new belt may cut an idle belt line
+   where it crosses it, and the card lists those tiles.
+4. **Preview** the stage (overlay in the world and on the map; the ground of later stages is drawn as faint outlines
+   with labels). Entities it would remove are drawn in red. Then **Approve** it. Approving marks exactly the listed
+   entities for removal (Reject or Dismiss cancels the marks that are left), places tagged ghosts, marks trees/rocks in
+   the way, and starts the helper (spawned if needed). The helper takes the listed coal, dismantles the listed builds
+   (their items go to its inventory, or into a chest of its own when it is full), then builds everything. It takes
+   materials from nearby chests, then your inventory (mod setting), and crafts, smelts or mines the rest. Afterwards
+   it keeps the hand-fed burners fuelled (S0/S1 only) and restarts a coal field that ever stops.
+5. The later stages wait in the Plans tab under **Roadmap** with what each waits for. When its research is done and
+   the stage before it is built, the game offers it by itself ("Stage ready: S3 Automate red science") and it
+   appears as a normal card to preview and approve. In Claude Code, `plan_next_stage(master)` does the same on demand
+   and `plan_roadmap(master)` shows every stage's status.
 
 ### Cost gate
 
@@ -132,24 +134,27 @@ In Claude Code you can still say "check my base", "set me up with a starter base
 
 | Piece | Where | What |
 |---|---|---|
-| `claude-bridge` mod (0.4.1) | `mod/claude-bridge` (linked into Factorio's `mods` folder: `%APPDATA%\Factorio`, `~/Library/Application Support/factorio`, `~/.factorio`) | GUI, free helper/foreman/blueprints, plan overlay + tagged ghost placement (`scripts/plans.lua`), map/game-data export to script-output, UDP + `/claude <json>` RCON API, Claude inbox |
-| planner | `factorio_claude/planner/` | world model (`world.py`, `grid.py`), game data (`gamedata.py`), rate solver (`rates.py`), verified blocks (`blocks.py`), A* belt/pipe router + pole placer (`router.py`), starter-base placer (`placer.py`, `plan.py`), staged on-site planner with state, bill/ETA and rebuild review (`staged.py`, `onsite.py`, `state.py`, `cost.py`, `agenda.py`, `existing.py`, `stage2.py`), quality gates (`quality.py`), static validator (`validate.py`) |
+| `claude-bridge` mod (0.5.0) | `mod/claude-bridge` (linked into Factorio's `mods` folder: `%APPDATA%\Factorio`, `~/Library/Application Support/factorio`, `~/.factorio`) | GUI, free helper/foreman/blueprints, plan overlay + tagged ghost placement (`scripts/plans.lua`), map/game-data export to script-output, UDP + `/claude <json>` RCON API, Claude inbox |
+| planner | `factorio_claude/planner/` | world model (`world.py`, `grid.py`), game data (`gamedata.py`), rate solver (`rates.py`), verified blocks (`blocks.py`), A* belt/pipe router + pole placer (`router.py`), master plans (planner v3: `master.py`), starter-base placer (`placer.py`, `plan.py`), staged on-site planner with state, bill/ETA and rebuild review (`staged.py`, `onsite.py`, `state.py`, `cost.py`, `agenda.py`, `existing.py`, `stage2.py`), quality gates (`quality.py`), static validator (`validate.py`) |
 | launcher | `launcher.py` (Windows shortcut: `pythonw launcher.pyw`; macOS: `Factorio (Claude).app`; Linux: menu entry) | starts Factorio with `--enable-lua-udp 34500 ...` (the game binary directly when Steam is already running or for a standalone copy, else `steam -applaunch 427520`) + companion |
 | platform paths | `factorio_claude/platforms.py` | Factorio user dir, Steam/Factorio/Claude Code discovery, venv python, detached processes, dialogs, clipboard per OS |
 | installers | `install.sh` (macOS/Linux), `install.ps1` (Windows) -> `install.py` | one-line bootstrap, then the cross-platform setup (`--check`, `--uninstall`) |
 | companion | `factorio_claude/companion.py` | hidden; polls the inbox, cost gate, answers with lean `claude -p` calls (`chat_model`, short planner-first prompt, pre-fetched context); log `logs/companion.log` |
 | link | `factorio_claude/link.py` | UDP client (chunked), RCON fallback |
-| MCP server `factorio` | `factorio_claude/server.py` via `run_server.py` (user scope) | observe, act, blueprints, agent, quick actions, foreman report; planner tools `plan_starter_base`, `world_summary`, `plan_preview`, `plan_validate`, `plan_apply`, `plan_helper`, `plan_list` |
+| MCP server `factorio` | `factorio_claude/server.py` via `run_server.py` (user scope) | observe, act, blueprints, agent, quick actions, foreman report; planner tools `plan_starter_base`, `plan_roadmap`, `plan_next_stage`, `world_summary`, `plan_preview`, `plan_validate`, `plan_apply`, `plan_helper`, `plan_list` |
 | Skill | `~/.claude/skills/factorio/SKILL.md` | playbooks for Claude Code |
 
 How a plan is made: the mod exports the charted map (`export_map`: water, resources, trees/rocks/cliffs, your
 entities) and the game data (`export_data`: prototypes, recipes, research) as files to script-output, plus a
 snapshot of your state (inventories, chests, machine status, production, research). The planner groups your existing
-builds into clusters and decides for each one keep / reuse / replace. It weighs on-site smelting against a central
-hub using real distances (iron counts most, then copper, coal, stone), places burner pairs on the patch edges or a
-hub with mixed ore/coal lanes and a bus, routes any belts (A*, no undergrounds until logistics is researched), places
-stage 2 (steam power, poles, labs) on the same footprint, prices every variant (bill and ETA) and runs the quality
-gates and the validator. The validator checks belts, lanes, inserters, fuel (including what burner inserters burn
+builds into clusters and decides for each one keep / reuse / replace. Planner v3 places the finished base's blocks
+(mining fields on the electric-drill grid, smelting columns, the red and green science block with labs, the steam
+block) where the belts they need are shortest by real walking distance, routes every belt of every stage at once
+(negotiated routing, so no belt has to cross another; undergrounds only from the stage after Logistics) and lays
+the boiler coal belt last, trying shore spots for the steam block with that belt routed for real. Each stage is the
+subset of that one layout, validated as a whole base, and the stages are checked against each other in code (nothing
+an early stage builds stands where a later one builds, except the planned in-place swaps). It prices every stage
+(bill and ETA) and runs the quality gates and the validator. The validator checks belts, lanes, inserters, fuel (including what burner inserters burn
 themselves), power, fluids, terrain and research, and checks that nothing touches your existing belts. Anything that
 fails is dropped and the next candidate is tried. Plans are saved in `plans/` and shown in the Plans tab.
 

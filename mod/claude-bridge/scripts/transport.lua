@@ -227,6 +227,16 @@ function transport.ask(player, text, source)
   return storage.chat_seq
 end
 
+-- A free event for the companion (source "plan": it never asks Claude about it), e.g. "stage_ready <plan id>".
+function transport.post_event(text)
+  init()
+  storage.chat_seq = storage.chat_seq + 1
+  table.insert(storage.inbox, {id = storage.chat_seq, tick = game.tick, player = "server", player_index = 0,
+    role = "server", pos = {x = 0, y = 0}, surface = "nauvis", text = tostring(text), source = "plan"})
+  while #storage.inbox > 50 do table.remove(storage.inbox, 1) end
+  return storage.chat_seq
+end
+
 local function seen()
   local was = transport.companion_online()
   storage.companion_seen_tick = game.tick

@@ -74,14 +74,21 @@ The player sees their own x, y next to the Claude button, but can't see the map 
 write it as a clickable map pin [gps=X,Y] (e.g. "the furnaces at [gps=-40,20] are out of coal"), and for the one
 thing you most want them to look at, call factorio_mark (ring + label in the world and on the map).
 Planner first: for a starter base or any build bigger than a few entities, call plan_starter_base (one call: it
-reads the map and what the player and helper actually have, plans up to 4 variants, verifies belts, fuel, power and
-terrain, and shows them in the game's Plans tab). Then, in plain sentences, give for each variant the time to first
-plates, what it needs against what they have, how the coal gets to the burners (the helper carries it from the coal
-drills; the burners stop if the helper is away for about 20 minutes), what (if anything) it takes apart of their old
-builds or takes coal out of and why, and its stage 2 (power and labs: when red science research can start); recommend
-one (the "recommended" plan unless the player's goal says otherwise) and say honestly when a variant is slow or keeps
-the helper busy. They Preview and Approve one in the Plans tab. When stage 1 runs and they want the next step, show its
-stage 2 with plan_preview (its id is in the plan's stages). Never hand-place large builds
+reads the map and what the player and helper actually have and designs the whole starter base first, through
+automated red AND green science, then splits it into stages that only add to it or swap in place; the current stage
+is shown in the game's Plans tab, the later ones wait there and are offered by the game itself when their research is
+done and the stage before is built). When it returns masters, recommend the "recommended" one (its card says why)
+and describe it as a roadmap in plain sentences: what the finished base makes, the stage to build now ("ready in"
+minutes, what it needs against what they have), the next stages with roughly when each is done and the research each
+waits for (S3 red science after Automation, S4 electric drills in the burner drills' places after Electric mining
+drill, S5 green science), and self_running_from (from that stage the base runs with the helper idle; before it the
+helper keeps some burners fuelled); one sentence on the other variant. Say the one exception plainly when it is in
+"exceptions": the first 10 red packs (Automation) are hand-made and put in a lab, because no assembler exists before
+it. Nothing of the player's is taken apart by default: if takes_apart.could_remove or could_take_coal is not zero,
+say what it would gain and that you can re-plan with allow_removal=true only if they say yes. When a stage is built or
+its research is done, plan_next_stage shows the next one. When it returns plans instead (the older planner), give per variant the
+time to first plates, what it needs, how the coal reaches the burners and what it takes apart, and recommend one.
+Say honestly when a plan is slow or keeps the helper busy. They Preview and Approve in the Plans tab. Never hand-place large builds
 (factorio_place_ghosts / blueprint_place refuse more than 50 ghosts) and never call plan_apply: the player approves
 plans in the Plans tab. Old builds are only ever taken apart through an approved plan that lists them.
 world_summary gives patches and water in one call. Pass plan="<short id>" when placing a few ghosts by hand.
@@ -626,14 +633,19 @@ def plan_event(m):
     """Plans tab clicks (source="plan", text "approved <id>") cost nothing: the mod already placed the ghosts and
     started the helper on them (spawning it if needed). Just confirm in chat. Never asks Claude. -> reply text."""
     verb, _, pid = str(m.get("text") or "").strip().partition(" ")
-    if verb.lower() != "approved" or not pid:
+    if verb.lower() not in ("approved", "stage_ready") or not pid:
         return None
-    title = pid
+    title, d = pid, {}
     try:
         d = json.loads((PLANS_DIR / f"{''.join(c for c in pid if c.isalnum() or c in '-_')}.json").read_text("utf-8"))
         title = d.get("title") or pid
     except (OSError, ValueError):
         pass
+    if verb.lower() == "stage_ready":
+        # the mod offers a planner v3 stage once its research is done and the stage before it is built
+        eta = ((d.get("stats") or {}).get("eta") or {}).get("build")
+        return (f"Next stage ready: {title}. It is in the Plans tab: Preview it, then Approve"
+                + (f" (about {round(eta)} min to build)." if isinstance(eta, (int, float)) and eta > 0 else "."))
     try:
         st = link.call("agent_status") or {}
         cur = (st.get("current") or {}).get("type")

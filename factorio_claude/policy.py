@@ -25,6 +25,7 @@ CHAT_TOOLS = (
     "factorio_quick_action", "factorio_agent_status", "factorio_agent_do", "factorio_agent_stop",
     # planner: proposes; the player approves in the Plans tab
     "plan_starter_base", "plan_preview", "plan_validate", "plan_list", "plan_helper", "world_summary",
+    "plan_roadmap", "plan_next_stage",
     # blueprints (no clipboard in chat mode)
     "blueprint_generate", "blueprint_check", "blueprint_decode", "blueprint_place",
 )

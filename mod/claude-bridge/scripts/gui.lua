@@ -441,6 +441,9 @@ local function plan_card(sp, p)
     lines[#lines + 1] = "[color=1,0.65,0.2]" .. w .. "[/color]"
   end
   local sup = p.status == "proposed" and p.superseded and plans.get(p.superseded)
+  if p.future and p.status == "proposed" and not p.superseded then   -- planner v3: a roadmap stage offered now
+    lines[#lines + 1] = "[color=0.4,0.9,0.4]Ready now: its research is done and the stage before it is built.[/color]"
+  end
   if p.status == "applied" then
     lines[#lines + 1] = "[color=0.4,0.9,0.4]Approved. " .. plans.result_text(p.result) .. "[/color]"
   elseif p.status == "applying" then
@@ -486,8 +489,8 @@ local function plan_card(sp, p)
   else
     plan_button(row, "build", id, "Helper: build", nil,
       "The helper builds this plan's ghosts only (never your own ghosts; spawning it if needed; it fetches, crafts " ..
-      "or mines the materials), then keeps the hand-fed burners fuelled every few minutes until you give it " ..
-      "another order. Free.")
+      "or mines the materials), then keeps any hand-fed burners fuelled (and restarts a stopped coal field) every " ..
+      "few minutes until you give it another order. Free.")
     if #plans.fuel_at(p) > 0 then
       plan_button(row, "refuel", id, "Helper: refuel", nil,
         "The helper fills this plan's hand-fed burners once (coal drills first, then each pair; it fetches coal " ..
@@ -500,26 +503,55 @@ local function plan_card(sp, p)
   end
 end
 
+-- planner v3: the stages of a master plan that wait for research or for the stage before them, one line each
+local function roadmap_rows(sp, future)
+  table.sort(future, function(a, b)
+    if a.future.master ~= b.future.master then return a.future.master < b.future.master end
+    return (a.future.order or 0) < (b.future.order or 0)
+  end)
+  local lines = {"[font=default-bold]Roadmap (later stages, offered when ready)[/font]"}
+  for _, p in ipairs(future) do
+    local missing, built = plans.waiting_for(p)
+    local why = {}
+    if #missing > 0 then why[#why + 1] = "research " .. table.concat(missing, " + ") end
+    if not built then why[#why + 1] = "the stage before it" end
+    lines[#lines + 1] = "[color=0.75,0.75,0.75]" .. (p.future.label ~= "" and p.future.label or tostring(p.title)) ..
+      (#why > 0 and (" - waits for " .. table.concat(why, " and ")) or " - ready soon") .. "[/color]"
+  end
+  local l = sp.add{type = "label", caption = table.concat(lines, "\n")}
+  l.style.single_line = false
+  l.style.maximal_width = TEXT_W - 20
+end
+
 function refresh_tab.plans(player, c, st)
   c.claude_plans_msg.caption = st.plan_msg or ""
   c.claude_plans_msg.visible = (st.plan_msg or "") ~= ""
-  local list = plans.list(player.force.name)
+  local all = plans.list(player.force.name)
+  local list, future = {}, {}
+  for _, p in ipairs(all) do
+    if p.status == "future" then future[#future + 1] = p else list[#list + 1] = p end
+  end
   local sig = ""
-  for _, p in ipairs(list) do
+  for _, p in ipairs(all) do
     sig = sig .. p.id .. ":" .. p.status .. ":" .. tostring(p.shown) .. ":" .. (p.seq or 0) .. ":" ..
       #p.entities .. ":" .. (p.result and p.result.tick or "") .. ":" .. tostring(p.superseded) .. ";"
   end
+  if #future > 0 then sig = sig .. "|" .. math.floor(game.tick / 600) end   -- waiting lines refresh every 10 s
   local sp = c.claude_plans_list
   if st.plans_sig == sig and #sp.children > 0 then return end
   st.plans_sig = sig
   sp.clear()
-  if #list == 0 then
+  if #all == 0 then
     wrap_label(sp, nil, "[color=0.7,0.7,0.7]No plans yet. Ask Claude for one, e.g. \"set me up with a starter base\".[/color]")
     return
   end
   for _, p in ipairs(list) do
     local ok, err = pcall(plan_card, sp, p)
     if not ok then log("claude-bridge plan card " .. tostring(p.id) .. ": " .. tostring(err)) end
+  end
+  if #future > 0 then
+    local ok, err = pcall(roadmap_rows, sp, future)
+    if not ok then log("claude-bridge roadmap rows: " .. tostring(err)) end
   end
 end
 

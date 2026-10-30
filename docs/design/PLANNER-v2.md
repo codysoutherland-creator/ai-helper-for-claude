@@ -71,7 +71,9 @@ Recipe costs come from `gamedata` at runtime; the values below are for the model
 | Automation science pack | 5 s | 2 Fe + 1 Cu |
 | Coal | 4 MJ | stone furnace: 0.072 coal per plate |
 
-2.x power ratio is 1 pump : 200 boilers : 400 engines (the 1.1 ratio 1:20:40 is obsolete); boiler : engine stays 1:2.
+2.x power ratio is 1 pump : 20 boilers : 40 engines (corrected in PLANNER-v3.md section 3: the 2.1 offshore pump
+moves 1200 water/s, a boiler 60/s, an engine 30 steam/s; an earlier draft of this line said 1:200:400); boiler : engine
+is 1:2.
 `steam_size` and any doc that assumes 1:20:40 must be checked.
 
 ## 4. R1: state-aware planning

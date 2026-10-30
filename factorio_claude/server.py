@@ -4,6 +4,7 @@ Talks to the claude-bridge mod over UDP (game launched with --enable-lua-udp, i.
 single-player is fine), falling back to RCON. See link.py.
 """
 import json
+import math
 import os
 import subprocess
 import time
@@ -28,9 +29,11 @@ The player has free in-game buttons/keywords for simple helper actions (factorio
 the mod's foreman watches the base for free (factorio_foreman_report). Start with `factorio_overview`. Use `factorio_map` to see layouts before building. Prefer ghosts/blueprints
 (robots or the user build them) or the agent character; `factorio_instant_build`/`factorio_agent_give` are cheats -
 only use them when the user asks. Agent tasks run asynchronously in-game: queue them, then poll `factorio_agent_status`.
-Builds bigger than a few entities go through the planner: `plan_starter_base` plans from the player's actual
-state, verifies and shows up to 4 variants (with time to first plates, bill vs inventory, and what each would take
-apart) in the game's Plans tab; the player approves one there. Never hand-place large builds with ghost tools."""
+Builds bigger than a few entities go through the planner: `plan_starter_base` designs the whole starter base first
+(master plan per variant: burner mining that becomes electric in place, smelting, steam power, automated red science,
+green reserved), derives its stages and shows the current one in the game's Plans tab, where the player approves it;
+`plan_next_stage` offers the next stage when its research is done, `plan_roadmap` re-reads every stage's status.
+Never hand-place large builds with ghost tools."""
 
 mcp = MCPServer("factorio", instructions=INSTRUCTIONS)
 REGISTERED = []  # tool names registered in this process
@@ -441,18 +444,168 @@ def _state(cx, cy, radius=PLAN_RADIUS):
         return BaseState.fresh_start((cx, cy))
 
 
+def _master_world(mp):
+    """(World, GameData) over everything a master plan places (+ a margin): on a far-apart map a field can lie more
+    than PLAN_RADIUS from the hub, and a stage there would never count as built."""
+    from .planner.gamedata import GameData
+    from .planner.world import World
+    xs = [e.x for e in mp.ents] or [0.0]
+    ys = [e.y for e in mp.ents] or [0.0]
+    m = 24
+    area = (math.floor(min(xs)) - m, math.floor(min(ys)) - m, math.ceil(max(xs)) + m, math.ceil(max(ys)) + m)
+    world = World.from_link(surface=mp.surface, area=area, link=call, charted=_charted())
+    return world, GameData.from_link(link=_LinkShim)
+
+
+def _master_path(mid: str) -> Path:
+    safe = "".join(c for c in str(mid) if c.isalnum() or c in "-_")
+    return PLANS / f"{safe}.master.json"
+
+
+def _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=False):
+    """Planner v3: master plans (one end-state base per variant, stages derived from it). -> result dict, or None
+    when no master plan works here (the caller falls back to planner v2)."""
+    from .planner import master as M
+    try:
+        opts = M.master_options(world, gd, st, goal, allow_removal=allow_removal)
+    except M.MasterError as e:
+        return {"_fallback": str(e)}
+    group = f"g{int(time.time()) % 100000}"
+    out = []
+    for i, (mp, info) in enumerate(opts):
+        mp.stats["roadmap"] = {"eta": info["eta"], "status": {str(k): v for k, v in info["status"].items()},
+                               "card": info["card"], "recommended": info["recommended"], "score": info["score"]}
+        mp.save(PLANS)
+        now = info["now"]
+        p = M.stage_plan(mp, now, world, gd, st, info["eta"], info["status"],
+                         validation=(info["check"]["stages"].get(now) or {}).get("report"))
+        p.summary = info["card"]
+        if info["status"].get(now) == "waiting":    # its research is not done yet: the mod offers it when it is
+            s0 = M.stage_of(mp, now)
+            p.stats["future"] = {"master": mp.id, "label": f"{M.slabel(now)} {s0.title} ({mp.title})",
+                                 "gate": s0.gate, "after": None, "order": float(now)}
+        p.save(PLANS)
+        shown = _send_preview(p, group=group, show=(i == 0))
+        # the later stages wait in the game (not drawn, no ghosts): the mod offers each one when its research is
+        # done and the stage before it is built (Plans tab roadmap rows, a print, a companion event)
+        prev = p.id
+        for s in mp.stages:
+            k = s.index
+            if k <= now:
+                continue
+            fp = M.stage_plan(mp, k, world, gd, st, info["eta"], info["status"],
+                              validation=(info["check"]["stages"].get(k) or {}).get("report"))
+            fp.stats["future"] = {"master": mp.id, "label": M.roadmap_label(mp, k, info["eta"]), "gate": s.gate,
+                                  "after": prev, "order": float(k)}
+            fp.save(PLANS)
+            _send_preview(fp, group=group, show=False)
+            prev = fp.id
+        b = M.brief(mp, gd, info["eta"], info["status"], recommended=info["recommended"])
+        b["card"] = info["card"]
+        b["now_plan"] = p.id
+        b["checked"] = {"stages_valid": all(v["ok"] for v in info["check"]["stages"].values()),
+                        "monotone": not info["check"]["monotone"],
+                        "self_running_from": next((M.slabel(k) for k, v in sorted(info["check"]["stages"].items())
+                                                   if v["selfrun"]["ok"] and not v["selfrun"]["needs_helper"]), None)}
+        if "error" in shown:
+            b["preview_error"] = shown["error"]
+        out.append(b)
+    rec = next((b["master"] for b in out if b["recommended"]), out[0]["master"])
+    return {"masters": out, "recommended": rec, "not_offered": opts[0][1].get("not_offered") or [],
+            "state": st.brief(), "seconds": round(time.monotonic() - t0, 1), "group": group,
+            "next": "Present ONE recommended master plan as a roadmap (its card's first line says why it is "
+                    "recommended): what the finished base is (end_state), the stage now (now_plan: time to its "
+                    "first output, what it needs vs what they have), then each later stage in one line with "
+                    "roughly when it is done (roadmap eta.complete, minutes from now), its research gate and what it "
+                    "replaces in place (burner drills become electric drills in the same slots at S4, burner "
+                    "inserters become inserters at S2). Say which stages the helper must keep fuelled "
+                    "(needs_helper) and from which stage the base runs on its own. Say the exceptions entry "
+                    "plainly (Automation's 10 red packs are hand-made: no assembler exists before it). Nothing of "
+                    "theirs is taken apart unless they allow it: if takes_apart.could_remove or could_take_coal is "
+                    "not zero, say what it would gain and offer to re-plan with allow_removal=true. Mention the "
+                    "other variant in one sentence (its trade-off). The player approves the current stage in the "
+                    "Plans tab; the game offers each later stage when its research is done. Do not call "
+                    "plan_apply unless the player names the plan to build."}
+
+
+@tool
+def plan_roadmap(master_id: str) -> str:
+    """The whole roadmap of a planner v3 master plan (stages S0..S5 with research gates, bills, ETAs, what each
+    stage places and replaces), with each stage's status re-read from the game (done / now / ready / waiting)."""
+    from .planner import master as M
+    p = _master_path(master_id)
+    if not p.exists():
+        return f"ERROR: no master plan {master_id!r}"
+    mp = M.MasterPlan.load(p)
+    rd = mp.stats.get("roadmap") or {}
+    eta = {float(k) if "." in str(k) else int(k): v for k, v in (rd.get("eta") or {}).items()}
+    status = {float(k) if "." in str(k) else int(k): v for k, v in (rd.get("status") or {}).items()}
+    try:
+        cx, cy = mp.hub or (0, 0)
+        world, gd = _master_world(mp)
+        status = M.stage_status(mp, gd, world)
+        eta = M.roadmap_eta(mp, gd, _state(cx, cy), status=status)   # from now: built stages cost nothing
+    except (LinkError, TimeoutError, OSError):
+        gd = None
+    if gd is None:
+        return _jdump({"master": mp.id, "card": rd.get("card"), "status": status, "note": "game not reachable"})
+    return _jdump(M.brief(mp, gd, eta, status, recommended=rd.get("recommended", False)))
+
+
+@tool
+def plan_next_stage(master_id: str, show: bool = True) -> str:
+    """Offer the next stage of a planner v3 master plan: re-reads the map and research, finds the first stage that is
+    not built yet and whose research gate is open, re-checks it against the map as it is now and shows it in the
+    Plans tab (the player approves it there). Returns the stage, its gate, bill and what it replaces."""
+    from .planner import master as M
+    p = _master_path(master_id)
+    if not p.exists():
+        return f"ERROR: no master plan {master_id!r}"
+    mp = M.MasterPlan.load(p)
+    cx, cy = mp.hub or (0, 0)
+    try:
+        world, gd = _master_world(mp)
+    except (LinkError, TimeoutError, OSError) as e:
+        return f"ERROR: map export failed: {e}"
+    st = _state(cx, cy)
+    status = M.stage_status(mp, gd, world)
+    k = next((k for k, v in status.items() if v in ("now", "ready")), None)
+    if k is None:
+        waiting = next(((k, M.stage_of(mp, k).gate) for k, v in status.items() if v == "waiting"), None)
+        return _jdump({"master": mp.id, "status": {M.slabel(k): v for k, v in status.items()},
+                       "next": None, "waiting_for": waiting})
+    eta = M.roadmap_eta(mp, gd, st, status=status)
+    plan = M.stage_plan(mp, k, world, gd, st, eta, status)
+    plan.save(PLANS)
+    shown = _send_preview(plan, show=show)
+    b = plan.brief()
+    b.update({"master": mp.id, "stage": M.slabel(k), "status": {M.slabel(i): v for i, v in status.items()},
+              "valid": plan.validation.get("ok"), "removes": len(plan.removes)})
+    if "error" in shown:
+        b["preview_error"] = shown["error"]
+    return _jdump(b)
+
+
 @tool
 def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None = None, x: float | None = None,
-                      y: float | None = None, allow_removal: bool = True) -> str:
+                      y: float | None = None, allow_removal: bool = False) -> str:
     """Plan a starter base from the player's ACTUAL state (inventories, chests, what is built, research) near the
-    player (or x,y). The planner exports the map, plans and VERIFIES (deterministic, free) up to 4 variants and shows
-    them in the game's Plans tab, where the player previews and approves one:
+    player (or x,y). Planner v3: ONE end-state base per variant (central hub / smelt at each patch) through automated
+    red science with green science reserved, designed before anything is placed; the stages are derived from it
+    (S0 burner iron + coal, S1 burner copper, S2 steam power + labs, S3 automated red science, S4 electric drills in
+    the burner drills' slots, S5 green; connector stages S0b/S1b for long coal belts). Each stage only adds to the
+    same layout or swaps in place. Returns `masters` (brief per master: roadmap rows with gate, bill, eta, places,
+    removes, swaps; end_state; card) and shows the current stage of each in the Plans tab. When no master plan fits
+    the map it falls back to planner v2 (below). Planner v2 plans up to 4 variants that the player previews and
+    approves:
     quick (burner drills straight into furnaces on the iron patch, iron plates soonest; copper with stage 2),
     balanced (iron + copper pairs from the start), rebuild (only when taking apart or converting specific old builds of
     the player scores clearly better; it lists exactly what it removes and why) and longterm (a central hub only where
     its belts stay short, else twice the on-site smelting). variants: 1-4. Every variant also carries a placed, checked
     stage 2 (stages[1]: power at the water + labs, its own plan id for plan_preview once stage 1 runs) with its bill and
-    when red science research can start. allow_removal=False never proposes removing anything. stage: only for the
+    when red science research can start. allow_removal (default False): nothing of the player's is taken apart, cut
+    or emptied of coal; True (only when the player said yes) lets S0 take idle builds apart, new belts cut idle belt
+    lines and S0 take coal out of idle machines when that makes the base sooner. stage: only for the
     long-term hub ("bootstrap"|"electric"). Each plan comes with eta (minutes to first plates / full rate, modelled on
     what the helper really does including carrying coal between the sites), bill (needs / have / salvage / short /
     fuel), belts, removes, gates and card. In your reply, for EACH variant say the time to first plates, the bill
@@ -472,6 +625,13 @@ def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None 
     if stage:
         goal["stage"] = stage
     n = max(1, min(4, int(variants or 3)))
+    if os.environ.get("FACTORIO_PLANNER", "v3") == "v3" and not stage:
+        res = _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=allow_removal)
+        if res is not None and "_fallback" not in res:
+            return _jdump(res)
+        v3_reason = (res or {}).get("_fallback")
+    else:
+        v3_reason = None
     try:
         plans = staged.plan_options(world, gd, st, goal, variants=n, allow_removal=allow_removal)
     except Exception as e:  # noqa: BLE001 - v2 found nothing (e.g. no iron in range): the v1 hub planner
@@ -495,7 +655,8 @@ def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None 
             b["preview_error"] = shown["error"]
         out.append(b)
     rec = next((p.id for p in plans if p.stats.get("recommended")), plans[0].id)
-    return _jdump({"plans": out, "recommended": rec, "state": st.brief(),
+    extra = {"master_plan_not_offered": v3_reason} if v3_reason else {}
+    return _jdump({"plans": out, "recommended": rec, "state": st.brief(), **extra,
                    "seconds": round(time.monotonic() - t0, 1), "group": group,
                    "next": "Tell the player, per variant: time to first plates, what it needs vs what they have, "
                            "how the coal reaches the burners (the helper carries it), what it removes (if anything), "
@@ -547,7 +708,16 @@ def plan_apply(plan_id: str) -> str:
         x0, y0, x1, y1 = p.stats.get("bbox") or (-50, -50, 50, 50)
         world = World.from_link(surface=p.surface, area=(x0 - 8, y0 - 8, x1 + 8, y1 + 8), link=call,
                                 charted=_charted())
-        rep = p.revalidate(GameData.from_link(link=_LinkShim), world)
+        gd = GameData.from_link(link=_LinkShim)
+        ms = p.stats.get("master") or {}
+        if ms.get("id") and _master_path(ms["id"]).exists():
+            # a planner v3 stage: the whole base after this stage is what must work (the stages already built feed
+            # it, e.g. a connector stage's coal belt starts at the coal field built in S0), as plan_next_stage checked
+            from .planner import master as M
+            mp = M.MasterPlan.load(_master_path(ms["id"]))
+            rep = M.validate_stage(mp, gd, world, ms["stage"])
+        else:
+            rep = p.revalidate(gd, world)
         if not rep.ok:
             return _jdump({"plan": p.id, "applied": False, "why": rep.summary(6),
                            "next": "the map changed; plan again (plan_starter_base)"})
