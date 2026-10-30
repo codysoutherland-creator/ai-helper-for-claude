@@ -114,12 +114,14 @@ Chat works too: `@claude help` lists the free keyword commands (`@claude wood 20
 
 ### Cost gate
 
-The companion classifies each message. A build/design request (build, design, set up, plan, expand, optimize,
+Off by default: on a Claude subscription a request costs no extra money, so Claude just runs. Set
+`"cost_gate": true` in `config.json` (useful when paying per token through an API key) and the companion classifies
+each message. A build/design request (build, design, set up, plan, expand, optimize,
 lay out, ...) that is not phrased as a question, or anything over 200 characters, is a planning job: it gets the
 in-game "≈ $X, run it?" with Run / Cancel (free). Questions and status checks ("check my base", "why is my factory
 slow", "what should I build next?") go straight through. `@claude run` / `@claude cancel` answer a pending
 confirmation from chat; with none pending they are answered locally, never sent to Claude.
-`config.json`: `cost_gate` (true), `planning_estimate` ("≈ $0.05–0.30").
+`config.json`: `cost_gate` (false), `planning_estimate` ("≈ $0.05–0.30").
 
 In-game Claude never hand-places big builds. Raw ghost placement (`factorio_place_ghosts`, `blueprint_place`) refuses
 more than 50 ghosts unless `allow_large=True`. Every Claude ghost carries `tags.claude_plan`, so **Clear Claude's

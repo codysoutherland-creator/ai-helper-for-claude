@@ -11,9 +11,9 @@ FACTORIO_GAME_MATCH (count only game processes whose command line contains this;
 (factorio.exe / factorio) not under testenv), FACTORIO_EXIT_AFTER (60 s), FACTORIO_FIRST_WAIT (300 s),
 FACTORIO_FAKE_CLAUDE (tests: never run claude; answer with this text, "\\n" = newline, or "1" for an echo).
 
-Cost gate: requests that look like planning jobs (build/design/layout/base/... or > 200 chars) first get an in-game
+Cost gate (off by default; most people run Claude on a subscription): when on, requests that look like planning jobs (build/design/layout/base/... or > 200 chars) first get an in-game
 "≈ $X, run it?" with Run / Cancel (free); the answer comes back through the inbox as source="confirm", "run <id>" /
-"cancel <id>". Config: cost_gate (true), planning_estimate ("≈ $0.05–0.30").
+"cancel <id>". Config: cost_gate (false), planning_estimate ("≈ $0.05–0.30").
 
 Multiplayer safety (every question uses the host's Claude subscription; the mod enforces the same rules first):
 - who may ask follows the mod setting "Who can use Claude" (host-only by default), read from the game's own ping data
@@ -862,7 +862,7 @@ def main(argv=None):
     if not claude_available():
         log.warning("claude CLI not found at %s; questions will get an install hint", claude_exe())
     pending, worker = [], None
-    gate, gate_on = CostGate(), bool(cfg.get("cost_gate", True))
+    gate, gate_on = CostGate(), bool(cfg.get("cost_gate", False))
     access = Access(cfg)
     capped = False
     ack, epoch = 0, None  # highest inbox id received (acknowledged on the next poll) + the save it belongs to
