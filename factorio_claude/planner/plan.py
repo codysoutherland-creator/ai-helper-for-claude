@@ -84,6 +84,14 @@ class Plan:
                          **({"fuel_n": int(ex["fuel_n"])} if ex.get("fuel_n") else {})) if manual else ug
             if prime and not manual:      # planner v3: a self-feeding burner the helper primes with `prime` coal
                 extra = dict({"prime": int(prime)}, **({"type": ug} if ug else {}))
+            role = ex.get("role")
+            if role in ("mall_chest", "depot", "mall_am", "head_am"):
+                # autopilot mall (planner/expand.py): the mod registers its chests / machines as the helper's mall
+                # sources when they are built, and limits a mall chest's inventory to `bar` slots
+                mx = {"mall": "machine" if role in ("mall_am", "head_am") else "chest"}
+                if ex.get("bar"):
+                    mx["bar"] = int(ex["bar"])
+                extra = dict(extra, **mx) if isinstance(extra, dict) else dict(mx, **({"type": ug} if ug else {}))
             if e.recipe or extra:
                 row.append(e.recipe)
             if extra:
@@ -127,6 +135,12 @@ class Plan:
             args["future"] = dict(s["future"])
         if s.get("wire_with"):        # planner v3: earlier stages' poles this stage's poles are wired to
             args["wire_with"] = [[float(p[0]), float(p[1])] for p in s["wire_with"][:1000]]
+        if s.get("owner") in ("player", "autopilot"):   # who approves it: the player, or the mod for the autopilot
+            args["owner"] = s["owner"]
+        if s.get("mall_chests"):      # a mall stage's output chests (the helper's first source)
+            args["mall_chests"] = [[float(p[0]), float(p[1])] for p in s["mall_chests"][:64]]
+        if s.get("mall_build"):       # the mall stage itself (the helper may hand-craft what building it takes)
+            args["mall_build"] = True
         facts = self.facts()
         if facts:
             args["facts"] = facts

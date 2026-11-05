@@ -6,7 +6,8 @@ import struct
 import threading
 from pathlib import Path
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent / "config.json"
+# FACTORIO_CONFIG: another config file (test companions use one under testenv/, never the player's config.json)
+CONFIG_PATH = Path(os.environ.get("FACTORIO_CONFIG") or Path(__file__).resolve().parent.parent / "config.json")
 
 AUTH, AUTH_RESPONSE, EXEC, RESPONSE = 3, 2, 2, 0
 

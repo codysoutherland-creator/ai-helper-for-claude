@@ -17,6 +17,8 @@ local agent = require("scripts.agent")
 
 local plans = {}
 plans.on_change = function() end  -- gui.lua overrides it (refresh the Plans tab)
+plans.on_proposed = function() end  -- autopilot.lua overrides it (queue an autopilot plan for self-approval)
+plans.autopilot_quiet = function() return false end  -- autopilot.lua: its own stages are announced there
 
 local MAX_BLOCKED = 50    -- blocked entries listed in an apply result
 local ARROW_LIMIT = 20000 -- skip flow arrows beyond this
@@ -390,6 +392,10 @@ api.register("plan_preview", function(args)
   for _, k in ipairs({"variant", "stage", "group", "master"}) do
     if args[k] ~= nil then p[k] = tostring(args[k]) end
   end
+  -- who proposed it: "player" (default: a chat or Claude Code plan the player approves) or "autopilot" (approved by
+  -- autopilot.lua after its safety checks while the autopilot is on)
+  if args.owner ~= nil then p.owner = args.owner == "autopilot" and "autopilot" or "player" end
+  p.owner = p.owner or "player"
   p.title = p.title or id
   if args.summary ~= nil then p.lines = lines_of(args.summary) end
   if args.warnings ~= nil then p.warnings = lines_of(args.warnings) end
@@ -533,9 +539,20 @@ api.register("plan_preview", function(args)
       end
     end
   end
+  -- the mall stage itself: what building it takes is bootstrap hand-crafting (there is no finished mall to take from)
+  if args.mall_build ~= nil then p.mall_build = args.mall_build == true end
+  -- a mall stage: its output chests {{x, y}} (the helper's first source once built)
+  if args.mall_chests ~= nil then
+    p.mall_chests = {}
+    for _, d in pairs(args.mall_chests) do
+      if type(d) == "table" and type(d[1]) == "number" and type(d[2]) == "number" and #p.mall_chests < 64 then
+        p.mall_chests[#p.mall_chests + 1] = {d[1], d[2]}
+      end
+    end
+  end
   compute_bbox(p)
   local out = {id = id, entities = #p.entities, deconstruct = #p.deconstruct, bad_rows = bad, bbox = p.bbox,
-    removes = p.removes and #p.removes or 0}
+    removes = p.removes and #p.removes or 0, owner = p.owner}
   local u = {}
   for n in pairs(unknown) do u[#u + 1] = n end
   if #u > 0 then out.unknown = u end
@@ -550,6 +567,7 @@ api.register("plan_preview", function(args)
     out.pending = out.objects == nil  -- big plan: finishes drawing over the next ticks
     log({"", "claude-bridge plan_preview ", id, " ", out.objects or "pending", " objects: ", prof})
   end
+  if p.status == "proposed" and not args.append then plans.on_proposed(p) end
   return out
 end)
 
@@ -570,7 +588,8 @@ local function plan_info(p, full)
     entities = #p.entities, deconstruct = #p.deconstruct, surface = p.surface, force = p.force, shown = p.shown or false,
     drawing = p.draw ~= nil, superseded = p.superseded,
     summary = p.lines, warnings = p.warnings, validation = p.validation, bbox = p.bbox, tick = p.tick, result = p.result,
-    facts = p.facts, future = p.future, ready_tick = p.ready_tick}
+    facts = p.facts, future = p.future, ready_tick = p.ready_tick, owner = p.owner, master = p.master,
+    autopilot_blocked = p.autopilot_blocked}
   if p.removes and #p.removes > 0 then o.removes = plans.removal_counts(p) end
   if p.takes and #p.takes > 0 then o.takes = {listed = #p.takes, done = p.takes_done or false} end
   if full then o.counts = entity_brief(p) end
@@ -647,9 +666,13 @@ end
 local function mark_removals(p, surface, force)
   p.removing, p.deferred = p.removing or {}, p.deferred or {}
   p.rm = p.rm or {marked = 0, removed = 0, changed = 0, cancelled = 0, kept = 0}
+  -- an autopilot plan's removals are not marked now: a machine marked for deconstruction stops working, and the
+  -- helper takes each one apart only when its replacement is in hand (round 2 run: marking every burner drill of S4
+  -- at approval stopped all iron and copper for 20 game minutes). Its ghosts there wait (deferred) until then.
+  p.lazy_removal = p.owner == "autopilot" or nil
   for _, rm in ipairs(p.removes or {}) do
     local e = plans.find_listed(surface, p, rm)
-    if e and e.unit_number and (e.to_be_deconstructed() or e.order_deconstruction(force)) then
+    if e and e.unit_number and (p.lazy_removal or e.to_be_deconstructed() or e.order_deconstruction(force)) then
       p.removing[e.unit_number] = {name = rm[1], x = rm[2], y = rm[3], entity = e}
       p.rm.marked = p.rm.marked + 1
     else
@@ -797,6 +820,11 @@ local function apply_step(p, n)
         local params = {name = "entity-ghost", inner_name = name, position = pos, direction = dir, force = force, tags = tags}
         local ex = e[6]
         if ex and (ex.type == "input" or ex.type == "output") then params.type = ex.type end
+        if type(ex) == "table" and (ex.mall or ex.bar) then
+          -- an autopilot mall's chest / machine: registered as the helper's mall source when built (autopilot.lua),
+          -- a chest's inventory limited to `bar` slots
+          params.tags = {claude_plan = p.id, claude_mall = ex.mall, claude_bar = tonumber(ex.bar)}
+        end
         local g = surface.create_entity(params)
         if g then
           r.placed = r.placed + 1
@@ -990,8 +1018,12 @@ function plans.place_deferred(p)
       local ok = surface.can_place_entity{name = e[1], position = pos, direction = e[4], force = force, forced = true,
         build_check_type = defines.build_check_type.manual_ghost}
       local ug = e[6] and (e[6].type == "input" or e[6].type == "output") and e[6].type or nil
+      local tg = {claude_plan = p.id}
+      if type(e[6]) == "table" and (e[6].mall or e[6].bar) then
+        tg.claude_mall, tg.claude_bar = e[6].mall, tonumber(e[6].bar)
+      end
       local g = ok and surface.create_entity{name = "entity-ghost", inner_name = e[1], position = pos, direction = e[4],
-        force = force, tags = {claude_plan = p.id}, type = ug}
+        force = force, tags = tg, type = ug}
       if g then
         n = n + 1
         if e[5] then pcall(g.set_recipe, e[5]) end
@@ -1043,6 +1075,7 @@ function plans.removed(unit, how)
   end
 end
 api.plans_removed = plans.removed
+api.plans_place_deferred = function(p) return plans.place_deferred(p) end
 
 local function on_gone(ev)
   local e = ev.entity
@@ -1145,6 +1178,7 @@ function plans.check_ready()
         local force = game.forces[p.force]
         local msg = "Stage ready: " .. (p.future.label ~= "" and p.future.label or tostring(p.title)) ..
           ". Preview and approve it in the Plans tab."
+        if plans.autopilot_quiet(p) then force = nil end   -- the autopilot announces (and approves) its own stages
         if force then
           for _, pl in pairs(force.connected_players) do
             pl.print({"", "[color=0.85,0.47,0.34][Claude helper][/color] ", msg})
@@ -1154,6 +1188,7 @@ function plans.check_ready()
         if okt and type(transport) == "table" and transport.post_event then
           pcall(transport.post_event, "stage_ready " .. p.id)
         end
+        plans.on_proposed(p)
       end
     end
   end
@@ -1220,7 +1255,8 @@ api.register("plan_helper", function(args)
   local what = (args.what == "refuel" or args.what == "round") and args.what or "build"
   if not p.bbox then error("plan has no entities") end
   local player = args.player and util.get_player(args) or nil
-  return {msg = agent.work_area(player, p.bbox, what, p.title, plans.fuel_at(p), p.id)}
+  return {msg = agent.work_area(player, p.bbox, what, p.title, plans.fuel_at(p), p.id,
+    {autopilot = args.autopilot and true or nil})}
 end)
 
 -- one-line description of an apply result (GUI / chat)

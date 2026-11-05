@@ -360,3 +360,95 @@ def test_world_from_link_refuses_dirs_outside_script_output(tmp_path, monkeypatc
     calls = {"export_map": {"run_id": "1", "dir": "../../outside", "done": True}}
     with pytest.raises(OSError, match="outside script-output"):
         World.from_link(link=lambda op, **_: calls[op], area=(0, 0, 32, 32), timeout=1)
+
+
+# ---------------------------------------------------------------- autopilot (AUTOPILOT.md 4.4, 5)
+
+def _probe_mode(mode: str, code: str) -> dict:
+    env = dict(os.environ, FACTORIO_UDP_PORT="34599", FACTORIO_RCON_PORT="27099", FACTORIO_UDP_TIMEOUT="0.2",
+               FACTORIO_BLUEPRINT_DIR=str(ROOT / "testenv" / "_unused"))
+    env.pop(policy.CHAT_MODE_ENV, None)
+    env.pop(policy.AUTOPILOT_MODE_ENV, None)
+    if mode:
+        env[mode] = "1"
+    prog = "import json\nfrom factorio_claude import server as s\nout = {}\n" + code + "\nprint(json.dumps(out))"
+    r = subprocess.run([sys.executable, "-c", prog], cwd=ROOT, env=env, capture_output=True, text=True, timeout=120)
+    assert r.returncode == 0, r.stderr
+    return json.loads(r.stdout.strip().splitlines()[-1])
+
+
+def test_autopilot_tool_lists():
+    ap = set(policy.AUTOPILOT_TOOLS)
+    assert ap <= set(policy.CHAT_TOOLS) | set(policy.AUTOPILOT_ONLY)
+    assert not ap & set(policy.AUTOPILOT_FORBIDDEN)
+    for bad in ("plan_apply", "factorio_instant_build", "factorio_agent_give", "factorio_run_lua", "factorio_say",
+                "factorio_deconstruct", "factorio_agent_remove", "factorio_autopilot", "plan_starter_base"):
+        assert bad not in ap
+    # every tool is in exactly one of the full-mode lists, the autopilot-only ones in none of them
+    assert not set(policy.AUTOPILOT_ONLY) & (set(policy.CHAT_TOOLS) | set(policy.NOT_IN_CHAT))
+    assert {"factorio_autopilot", "factorio_autopilot_report"} <= set(policy.NOT_IN_CHAT)
+
+
+def test_autopilot_mode_registers_only_its_allowlist_and_refuses_like_chat():
+    out = _probe_mode(policy.AUTOPILOT_MODE_ENV, """
+out['tools'] = s.REGISTERED
+out['lua'] = s.factorio_run_lua("game.print(1)")
+out['decon'] = s.factorio_deconstruct(0, 0, radius=100)
+""")
+    assert set(out["tools"]) == set(policy.AUTOPILOT_TOOLS)
+    assert out["lua"].startswith("REFUSED") and out["decon"].startswith("REFUSED")
+    full = set(_probe_mode("", "out['tools'] = s.REGISTERED")["tools"])
+    assert not full & set(policy.AUTOPILOT_ONLY), "the decision tools exist in autopilot mode only"
+    chat = set(_probe_mode(policy.CHAT_MODE_ENV, "out['tools'] = s.REGISTERED")["tools"])
+    assert "factorio_autopilot" not in chat and "autopilot_decide" not in chat
+
+
+def test_owner_argument_is_refused_in_chat_mode():
+    out = _probe_mode(policy.CHAT_MODE_ENV, """
+out['start'] = s.plan_starter_base(owner="autopilot")
+out['next'] = s.plan_next_stage("m", owner="autopilot")
+""")
+    assert out["start"].startswith("REFUSED") and out["next"].startswith("REFUSED")
+    out = _probe_mode("", "out['bad'] = s.plan_next_stage('m', owner='root')")
+    assert out["bad"].startswith("ERROR")
+
+
+def test_autopilot_decision_tool_writes_only_its_file(tmp_path):
+    f = tmp_path / "d.json"
+    env_code = f"import os\nos.environ['{policy.AUTOPILOT_DECISION_ENV}'] = {str(f)!r}\n"
+    out = _probe_mode(policy.AUTOPILOT_MODE_ENV, env_code + """
+out['r'] = s.autopilot_decide("G3", "smelting", "plates are short", "more smelting" * 20)
+out['n'] = s.autopilot_note("built the mall")
+""")
+    assert out["r"] == "recorded" and out["n"] == "recorded"
+    d = json.loads(f.read_text(encoding="utf-8"))
+    assert d["option"] == "G3" and len(d["status_line"]) <= 80 and d["notes"] == ["built the mall"]
+
+
+def test_autopilot_claude_command_uses_its_allowlist(tmp_path, monkeypatch):
+    from factorio_claude import autopilot as AP
+    monkeypatch.setattr(c, "_cli_flags", {"--max-turns", "--setting-sources"})
+    d = AP.Decider({"chat_model": "sonnet"}, tmp_path)
+    cmd = d.command("prompt", "system", tmp_path / "decision.json", {})
+    allowed = cmd[cmd.index("--allowedTools") + 1].split(",")
+    assert set(allowed) == set(policy.mcp_names(policy.AUTOPILOT_TOOLS))
+    denied = cmd[cmd.index("--disallowedTools") + 1].split(",")
+    for t in ("plan_apply", "factorio_run_lua", "factorio_instant_build", "factorio_say", "factorio_agent_do"):
+        assert f"mcp__factorio__{t}" in denied
+    assert cmd[cmd.index("--max-turns") + 1] == "12" and "--strict-mcp-config" in cmd
+    cfg = json.loads((tmp_path / "autopilot" / "mcp.json").read_text(encoding="utf-8"))
+    env = cfg["mcpServers"]["factorio"]["env"]
+    assert env[policy.AUTOPILOT_MODE_ENV] == "1" and "FACTORIO_RCON_PASSWORD" not in env
+    assert env[policy.AUTOPILOT_DECISION_ENV].endswith("decision.json")
+
+
+def test_only_the_host_can_switch_the_autopilot():
+    """autopilot.lua: the toggle checks access.is_host for players (the console / UDP caller is the host's machine);
+    the GUI checkbox is disabled for others and chat answers 'Only the host can do that'."""
+    src = (ROOT / "mod" / "claude-bridge" / "scripts" / "autopilot.lua").read_text(encoding="utf-8")
+    fn = src[src.index("function autopilot.set(on, player)"):]
+    assert fn.index("access.is_host(player)") < fn.index("s.epoch = (s.epoch or 0) + 1")
+    gui = (ROOT / "mod" / "claude-bridge" / "scripts" / "gui.lua").read_text(encoding="utf-8")
+    assert "enabled = host" in gui and "Only the host can switch the autopilot on or off." in gui
+    lc = (ROOT / "mod" / "claude-bridge" / "scripts" / "local_commands.lua").read_text(encoding="utf-8")
+    assert "Only the host can do that." in lc

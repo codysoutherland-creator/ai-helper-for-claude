@@ -417,6 +417,21 @@ end
 function transport.route_chat(player_index, msg)
   if not msg then return "ignored" end
   local lower = msg:lower()
+  -- "let claude play" (no @claude needed) switches the autopilot on: a free local command, host only
+  if lower:match("^%s*let claude play[%s%.!]*$") then
+    local p = player_index and game.get_player(player_index)
+    if p and not access.can_ask(p) then
+      access.deny(p)
+      return "denied", access.denied_text()
+    end
+    local lc = transport.local_commands
+    if lc and lc.autopilot then
+      local ok, reply = pcall(lc.autopilot, p, "on")
+      reply = ok and reply or ("Autopilot error: " .. tostring(reply))
+      if p then claude_print(p, reply) end
+      return "local", reply
+    end
+  end
   -- "@claude" must end the line or be followed by , : or whitespace (not "@claudette")
   local prefix = lower:match("^@claude[,:]?%s+") or lower:match("^@claude[,:]?$") or lower:match("^@claude[,:]")
     or lower:match("^claude[,:]%s*")

@@ -18,7 +18,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-CONFIG_PATH = ROOT / "config.json"
+CONFIG_PATH = Path(os.environ.get("FACTORIO_CONFIG") or ROOT / "config.json")   # FACTORIO_CONFIG: tests
 APP_NAME = "ai-helper-for-claude"
 DISPLAY_NAME = "Factorio (Claude)"
 FACTORIO_APPID = "427520"

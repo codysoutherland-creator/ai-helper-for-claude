@@ -5,7 +5,8 @@ from pathlib import Path
 
 from .. import platforms
 
-CONFIG_PATH = Path(__file__).resolve().parent.parent.parent / "config.json"
+CONFIG_PATH = Path(os.environ.get("FACTORIO_CONFIG") or
+                   Path(__file__).resolve().parent.parent.parent / "config.json")
 
 
 def script_output() -> Path:

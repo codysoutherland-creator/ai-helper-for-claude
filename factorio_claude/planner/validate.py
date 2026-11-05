@@ -1400,15 +1400,29 @@ class _Validator:
                         sysd["src"][p["name"]].append(r)
             elif r.type in CRAFTER_TYPES and r.recipe:
                 rc = self.gd.raw["recipes"][r.recipe]
-                fl = [x["name"] for x in (rc["products"] if pt == "output" else rc["ingredients"])
-                      if x.get("type") == "fluid"]
+                xs = [x for x in (rc["products"] if pt == "output" else rc["ingredients"]) if x.get("type") == "fluid"]
                 same = [fb2 for fb2 in self._fluid_boxes(r) if fb2.get("production_type") == pt]
                 pos = [fb2.get("index") for fb2 in same].index(idx)
-                if pos < len(fl):
+                # a recipe's fluidbox_index (1-based among the machine's input or output boxes) pins a fluid to its
+                # box (basic oil processing: crude in the refinery's 2nd input, petroleum out of its 3rd output);
+                # the other fluids take the remaining boxes in order
+                at = {}
+                for x in xs:
+                    fi = x.get("fluidbox_index")
+                    if fi and 0 < int(fi) <= len(same):
+                        at[int(fi) - 1] = x["name"]
+                free = (i for i in range(len(same)) if i not in at)
+                for x in xs:
+                    fi = x.get("fluidbox_index")
+                    if not (fi and 0 < int(fi) <= len(same)):
+                        j = next(free, None)
+                        if j is not None:
+                            at[j] = x["name"]
+                if pos in at:
                     if pt == "output":
-                        sysd["src"][fl[pos]].append(r)
+                        sysd["src"][at[pos]].append(r)
                     else:
-                        sysd["need"].append((r, fl[pos]))
+                        sysd["need"].append((r, at[pos]))
         for kind, key in (("pipe_in", "fluid_sources"), ("pipe_out", "fluid_sinks")):
             ps = [p for p in (self.ex.get(key) or [])] + [p for p in (self.ex.get("ports") or []) if _get(p, "kind") == kind]
             for p in ps:
@@ -1429,6 +1443,12 @@ class _Validator:
                     self.err("port", (x, y), f"{kind} port at {_p(x, y)}: no pipe there to connect")
                     continue
                 fbi = self._fluid_boxes(hit)[0].get("index")
+                if t not in hit.tiles:        # the port is the tile in front of a machine: the box connecting there
+                    for c in self.gd.fluid_connections_full(hit.name, hit.x, hit.y, hit.dir):
+                        if tuple(c.get("target_tile") or ()) == t and \
+                                any(fb.get("index") == c.get("fluidbox") for fb in self._fluid_boxes(hit)):
+                            fbi = c["fluidbox"]
+                            break
                 sysd = systems[uf.find((hit.i, fbi))]
                 fl = _get(p, "item") or _get(p, "fluid") or "*"
                 if kind == "pipe_in":

@@ -21,7 +21,9 @@ from .rcon import RconError, lua
 LIBRARY = Path(os.environ.get("FACTORIO_BLUEPRINT_DIR") or Path(__file__).resolve().parent.parent / "blueprints")
 LIBRARY_KEEP = 200  # newest saved blueprint strings kept in the library
 # In-game chat (companion) mode: only the chat allowlist is registered and risky arguments are refused (policy.py).
-CHAT_MODE = policy.chat_mode()
+# Autopilot mode (the companion's autopilot decisions) registers its own, smaller list and refuses the same arguments.
+AUTOPILOT_MODE = policy.autopilot_mode()
+CHAT_MODE = policy.chat_mode() or AUTOPILOT_MODE
 
 INSTRUCTIONS = """Tools for playing Factorio 2.x alongside the user.
 Coordinates are map tiles (x right, y DOWN). Entity positions are centers: 1x1 at .5, 2x2 at whole numbers, 3x3 at .5.
@@ -40,10 +42,17 @@ REGISTERED = []  # tool names registered in this process
 
 
 def tool(fn):
-    """@mcp.tool(), except that chat mode only registers the tools in policy.CHAT_TOOLS."""
-    if CHAT_MODE and fn.__name__ not in policy.CHAT_TOOLS:
+    """@mcp.tool(), except that chat mode only registers the tools in policy.CHAT_TOOLS and autopilot mode only those
+    in policy.AUTOPILOT_TOOLS (its decision tools exist in that mode only)."""
+    name = fn.__name__
+    if AUTOPILOT_MODE:
+        if name not in policy.AUTOPILOT_TOOLS:
+            return fn
+    elif CHAT_MODE and name not in policy.CHAT_TOOLS:
         return fn
-    REGISTERED.append(fn.__name__)
+    elif name in policy.AUTOPILOT_ONLY:
+        return fn
+    REGISTERED.append(name)
     return mcp.tool()(fn)
 
 
@@ -462,7 +471,57 @@ def _master_path(mid: str) -> Path:
     return PLANS / f"{safe}.master.json"
 
 
-def _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=False):
+def offer_master(mp, info, world, gd, st, group, show=True, owner=None) -> dict:
+    """Save one master plan and send its current stage (shown when `show`) plus its later stages (waiting in the
+    game until their research is done and the stage before is built) to the Plans tab. owner="autopilot": the mod
+    approves them itself while the autopilot is on. -> the master's brief."""
+    from .planner import master as M
+    mp.stats["roadmap"] = {"eta": info["eta"], "status": {str(k): v for k, v in info["status"].items()},
+                           "card": info["card"], "recommended": info["recommended"], "score": info["score"]}
+    if owner:
+        mp.stats["owner"] = owner
+    mp.save(PLANS)
+    now = info["now"]
+    p = M.stage_plan(mp, now, world, gd, st, info["eta"], info["status"],
+                     validation=(info["check"]["stages"].get(now) or {}).get("report"))
+    p.summary = info["card"]
+    if owner:
+        p.stats["owner"] = owner
+    if info["status"].get(now) == "waiting":    # its research is not done yet: the mod offers it when it is
+        s0 = M.stage_of(mp, now)
+        p.stats["future"] = {"master": mp.id, "label": f"{M.slabel(now)} {s0.title} ({mp.title})",
+                             "gate": s0.gate, "after": None, "order": float(now)}
+    p.save(PLANS)
+    shown = _send_preview(p, group=group, show=show)
+    # the later stages wait in the game (not drawn, no ghosts): the mod offers each one when its research is
+    # done and the stage before it is built (Plans tab roadmap rows, a print, a companion event)
+    prev = p.id
+    for s in mp.stages:
+        k = s.index
+        if k <= now:
+            continue
+        fp = M.stage_plan(mp, k, world, gd, st, info["eta"], info["status"],
+                          validation=(info["check"]["stages"].get(k) or {}).get("report"))
+        fp.stats["future"] = {"master": mp.id, "label": M.roadmap_label(mp, k, info["eta"]), "gate": s.gate,
+                              "after": prev, "order": float(k)}
+        if owner:
+            fp.stats["owner"] = owner
+        fp.save(PLANS)
+        _send_preview(fp, group=group, show=False)
+        prev = fp.id
+    b = M.brief(mp, gd, info["eta"], info["status"], recommended=info["recommended"])
+    b["card"] = info["card"]
+    b["now_plan"] = p.id
+    b["checked"] = {"stages_valid": all(v["ok"] for v in info["check"]["stages"].values()),
+                    "monotone": not info["check"]["monotone"],
+                    "self_running_from": next((M.slabel(k) for k, v in sorted(info["check"]["stages"].items())
+                                               if v["selfrun"]["ok"] and not v["selfrun"]["needs_helper"]), None)}
+    if "error" in shown:
+        b["preview_error"] = shown["error"]
+    return b
+
+
+def _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=False, owner=None):
     """Planner v3: master plans (one end-state base per variant, stages derived from it). -> result dict, or None
     when no master plan works here (the caller falls back to planner v2)."""
     from .planner import master as M
@@ -473,43 +532,7 @@ def _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=False):
     group = f"g{int(time.time()) % 100000}"
     out = []
     for i, (mp, info) in enumerate(opts):
-        mp.stats["roadmap"] = {"eta": info["eta"], "status": {str(k): v for k, v in info["status"].items()},
-                               "card": info["card"], "recommended": info["recommended"], "score": info["score"]}
-        mp.save(PLANS)
-        now = info["now"]
-        p = M.stage_plan(mp, now, world, gd, st, info["eta"], info["status"],
-                         validation=(info["check"]["stages"].get(now) or {}).get("report"))
-        p.summary = info["card"]
-        if info["status"].get(now) == "waiting":    # its research is not done yet: the mod offers it when it is
-            s0 = M.stage_of(mp, now)
-            p.stats["future"] = {"master": mp.id, "label": f"{M.slabel(now)} {s0.title} ({mp.title})",
-                                 "gate": s0.gate, "after": None, "order": float(now)}
-        p.save(PLANS)
-        shown = _send_preview(p, group=group, show=(i == 0))
-        # the later stages wait in the game (not drawn, no ghosts): the mod offers each one when its research is
-        # done and the stage before it is built (Plans tab roadmap rows, a print, a companion event)
-        prev = p.id
-        for s in mp.stages:
-            k = s.index
-            if k <= now:
-                continue
-            fp = M.stage_plan(mp, k, world, gd, st, info["eta"], info["status"],
-                              validation=(info["check"]["stages"].get(k) or {}).get("report"))
-            fp.stats["future"] = {"master": mp.id, "label": M.roadmap_label(mp, k, info["eta"]), "gate": s.gate,
-                                  "after": prev, "order": float(k)}
-            fp.save(PLANS)
-            _send_preview(fp, group=group, show=False)
-            prev = fp.id
-        b = M.brief(mp, gd, info["eta"], info["status"], recommended=info["recommended"])
-        b["card"] = info["card"]
-        b["now_plan"] = p.id
-        b["checked"] = {"stages_valid": all(v["ok"] for v in info["check"]["stages"].values()),
-                        "monotone": not info["check"]["monotone"],
-                        "self_running_from": next((M.slabel(k) for k, v in sorted(info["check"]["stages"].items())
-                                                   if v["selfrun"]["ok"] and not v["selfrun"]["needs_helper"]), None)}
-        if "error" in shown:
-            b["preview_error"] = shown["error"]
-        out.append(b)
+        out.append(offer_master(mp, info, world, gd, st, group, show=(i == 0), owner=owner))
     rec = next((b["master"] for b in out if b["recommended"]), out[0]["master"])
     return {"masters": out, "recommended": rec, "not_offered": opts[0][1].get("not_offered") or [],
             "state": st.brief(), "seconds": round(time.monotonic() - t0, 1), "group": group,
@@ -552,30 +575,51 @@ def plan_roadmap(master_id: str) -> str:
     return _jdump(M.brief(mp, gd, eta, status, recommended=rd.get("recommended", False)))
 
 
+def _owner_refusal(owner):
+    """`owner` is only for Claude Code at the host's terminal (full mode); chat mode can't make the mod approve."""
+    if owner not in (None, "", "player") and CHAT_MODE:
+        return chat_refusal("owner=" + repr(owner))
+    if owner not in (None, "", "player", "autopilot"):
+        return f"ERROR: owner must be 'player' or 'autopilot', not {owner!r}"
+    return None
+
+
 @tool
-def plan_next_stage(master_id: str, show: bool = True) -> str:
+def plan_next_stage(master_id: str, show: bool = True, owner: str | None = None) -> str:
     """Offer the next stage of a planner v3 master plan: re-reads the map and research, finds the first stage that is
     not built yet and whose research gate is open, re-checks it against the map as it is now and shows it in the
-    Plans tab (the player approves it there). Returns the stage, its gate, bill and what it replaces."""
+    Plans tab (the player approves it there). Returns the stage, its gate, bill and what it replaces.
+    owner="autopilot" (Claude Code only, when the host wants the autopilot to build it): the mod approves it itself
+    while the autopilot is on."""
+    refusal = _owner_refusal(owner)
+    if refusal:
+        return refusal
+    return _jdump(next_stage(master_id, show=show, owner=owner or None))
+
+
+def next_stage(master_id: str, show: bool = True, owner: str | None = None) -> dict:
+    """plan_next_stage as a dict (the autopilot calls this in-process)."""
     from .planner import master as M
     p = _master_path(master_id)
     if not p.exists():
-        return f"ERROR: no master plan {master_id!r}"
+        return {"error": f"no master plan {master_id!r}"}
     mp = M.MasterPlan.load(p)
     cx, cy = mp.hub or (0, 0)
     try:
         world, gd = _master_world(mp)
     except (LinkError, TimeoutError, OSError) as e:
-        return f"ERROR: map export failed: {e}"
+        return {"error": f"map export failed: {e}"}
     st = _state(cx, cy)
     status = M.stage_status(mp, gd, world)
     k = next((k for k, v in status.items() if v in ("now", "ready")), None)
     if k is None:
         waiting = next(((k, M.stage_of(mp, k).gate) for k, v in status.items() if v == "waiting"), None)
-        return _jdump({"master": mp.id, "status": {M.slabel(k): v for k, v in status.items()},
-                       "next": None, "waiting_for": waiting})
+        return {"master": mp.id, "status": {M.slabel(k): v for k, v in status.items()},
+                "next": None, "waiting_for": waiting}
     eta = M.roadmap_eta(mp, gd, st, status=status)
     plan = M.stage_plan(mp, k, world, gd, st, eta, status)
+    if owner:
+        plan.stats["owner"] = owner
     plan.save(PLANS)
     shown = _send_preview(plan, show=show)
     b = plan.brief()
@@ -583,12 +627,12 @@ def plan_next_stage(master_id: str, show: bool = True) -> str:
               "valid": plan.validation.get("ok"), "removes": len(plan.removes)})
     if "error" in shown:
         b["preview_error"] = shown["error"]
-    return _jdump(b)
+    return b
 
 
 @tool
 def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None = None, x: float | None = None,
-                      y: float | None = None, allow_removal: bool = False) -> str:
+                      y: float | None = None, allow_removal: bool = False, owner: str | None = None) -> str:
     """Plan a starter base from the player's ACTUAL state (inventories, chests, what is built, research) near the
     player (or x,y). Planner v3: ONE end-state base per variant (central hub / smelt at each patch) through automated
     red science with green science reserved, designed before anything is placed; the stages are derived from it
@@ -611,8 +655,12 @@ def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None 
     fuel), belts, removes, gates and card. In your reply, for EACH variant say the time to first plates, the bill
     against what the player has, how the coal reaches the burners (the helper carries it: how busy that keeps it), what
     (if anything) it removes or takes coal out of, and its stage 2 (what, when research can start); then recommend one
-    (`recommended`) and say why. Never approve or apply for the player."""
+    (`recommended`) and say why. Never approve or apply for the player. owner="autopilot" (Claude Code only): the
+    mod approves the stages itself while the autopilot is on."""
     from .planner import placer, staged
+    refusal = _owner_refusal(owner)
+    if refusal:
+        return refusal
     cx, cy, surface = _player_spot(x, y)
     t0 = time.monotonic()
     try:
@@ -626,7 +674,7 @@ def plan_starter_base(goal_text: str = "", variants: int = 3, stage: str | None 
         goal["stage"] = stage
     n = max(1, min(4, int(variants or 3)))
     if os.environ.get("FACTORIO_PLANNER", "v3") == "v3" and not stage:
-        res = _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=allow_removal)
+        res = _plan_masters(world, gd, st, goal, cx, cy, t0, allow_removal=allow_removal, owner=owner or None)
         if res is not None and "_fallback" not in res:
             return _jdump(res)
         v3_reason = (res or {}).get("_fallback")
@@ -856,6 +904,69 @@ def factorio_foreman_report(rescan: bool = False) -> str:
     """The mod's free rule-based base monitor: alerts (power_shortage, no_fuel, depleted, no_power/low_power,
     research_idle, output_full, starved) with severity, positions and counts, plus stats. rescan=True scans now."""
     return _call("foreman_report", rescan=rescan or None)
+
+
+# ---------------------------------------------------------------- autopilot (AUTOPILOT.md 4.4, 9)
+
+JOURNAL = Path(os.environ.get("FACTORIO_AUTOPILOT_JOURNAL") or
+               Path(__file__).resolve().parent.parent / "logs" / "autopilot.jsonl")
+
+
+def _decision_file() -> Path | None:
+    p = os.environ.get(policy.AUTOPILOT_DECISION_ENV)
+    return Path(p) if p else None
+
+
+def _decision_write(update: dict) -> str:
+    path = _decision_file()
+    if path is None:
+        return "ERROR: not running as the autopilot"
+    try:
+        d = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    except (OSError, ValueError):
+        d = {}
+    notes = d.get("notes") or []
+    if "note" in update:
+        notes.append(str(update.pop("note"))[:200])
+    d.update(update)
+    d["notes"] = notes[-5:]
+    path.write_text(json.dumps(d), encoding="utf-8")
+    return "recorded"
+
+
+@tool
+def autopilot_decide(option: str, goal_text: str = "", why: str = "", status_line: str = "") -> str:
+    """Return your decision to the autopilot: `option` must be one of the offered option ids. goal_text: the goal in
+    a few words; why: one sentence; status_line: at most 80 characters for the in-game status line. Call it once."""
+    return _decision_write({"option": str(option)[:40], "goal_text": str(goal_text)[:120], "why": str(why)[:300],
+                            "status_line": str(status_line)[:80]})
+
+
+@tool
+def autopilot_note(text: str) -> str:
+    """Record one short milestone line for the autopilot's log (shown to the player in chat at most every 2 game
+    minutes)."""
+    return _decision_write({"note": text})
+
+
+@tool
+def factorio_autopilot(on: bool | None = None) -> str:
+    """The autopilot ("Let Claude play"): with on=True/False switch it on or off (the host's own machine counts as the
+    host), without `on` just read its state (goal, step, phase, Claude calls, approve queue, helper counters)."""
+    try:
+        if on is not None:
+            call("autopilot_set", on=bool(on))
+        return _jdump(call("autopilot_get"))
+    except LinkError as e:
+        return f"ERROR: {e}"
+
+
+@tool
+def factorio_autopilot_report(hours: float = 3) -> str:
+    """Summary of the autopilot's journal (logs/autopilot.jsonl) over the last `hours` of real time: decisions,
+    Claude calls, stuck periods, errors, and the latest metrics."""
+    from . import autopilot as AP
+    return _jdump(AP.report(JOURNAL, hours=hours))
 
 
 # ---------------------------------------------------------------- chat

@@ -8,7 +8,7 @@ commit personal data (logs, saves, `config.json`, chat sessions, user paths). `.
 | Path | What |
 |---|---|
 | `mod/claude-bridge/` | The Factorio 2.1 mod (Lua). The internal name `claude-bridge` must not change (save compatibility). |
-| `factorio_claude/` | Python: `link.py` (UDP + RCON client), `server.py` (MCP server `factorio`), `companion.py` (in-game chat daemon that runs `claude -p`), `policy.py` (in-game tool allowlist), `platforms.py` (per-OS paths), `blueprints.py`, `planner/` (deterministic starter-base planner) |
+| `factorio_claude/` | Python: `link.py` (UDP + RCON client), `server.py` (MCP server `factorio`), `companion.py` (in-game chat daemon that runs `claude -p`), `policy.py` (in-game tool allowlist), `platforms.py` (per-OS paths), `blueprints.py`, `planner/` (deterministic starter-base planner), `autopilot.py` + `autopilot_rules.py` (the "Let Claude play" loop: rules, pacing, Claude decisions), `knowledge/` (doctrine and roadmap data, checked against the game data) |
 | `run_server.py`, `launcher.py`, `launcher.pyw` | Entry points: MCP server, one-click launcher, Windows shim |
 | `install.py`, `install.sh`, `install.ps1` | Cross-platform setup and the one-line bootstraps |
 | `skill/factorio/SKILL.md` | Generic Claude Code skill; the installer copies it to `~/.claude/skills/factorio/` |
@@ -113,11 +113,23 @@ In-engine checks (each on its own slot):
   the helper (labs powered and researching, boiler and stage-1 burners fuelled, stage-1 rate held).
 - `tests/live_convert.py --save <zip>`: a planner v2 conversion (the player's idle drill line turned into pairs where
   it stands) built by the helper: exactly the listed belts removed, the drills kept and producing.
+- `tests/live_autopilot.py --save <zip> --slot 3N --hours H [--player-lab] [--fake-claude] [--plans-from DIR]`: the
+  autopilot ("Let Claude play") on a player-like server with a test companion (its own config, ports, plans dir and
+  journal under the run folder), switched on by the server console, then no other input; samples every 5 game
+  minutes, renders every 30, the player's baseline checked at the end. Results in
+  `testenv/private/autopilot/runs/<tag>/` (gitignored). `--fake-claude` makes no `claude -p` calls.
+- `tests/live_expand_blocks.py [--slot 31] [case ...]`: engine checks of the autopilot's expansion blocks (mall row,
+  merged smelting column, bus taps, oil plant, the pumpjack trigger) with infinity-fed belts and pipes.
+- `tests/live_autopilot_toggle.py [--slot 35]`: the switch (Q5): host-only GUI and chat, off cancels the grace queue
+  and the helper's autopilot tasks, save and reload, a companion resuming. Uses `testenv/write/sec_players.zip`.
+- `tools/verify_doctrine.py --data <factorio>/data`: the doctrine's game facts against the installed prototypes
+  (`--gamedata` for an `export_data` dump); `tools/gen_doctrine_md.py` regenerates `doctrine.md` (a test checks it).
 - `testenv/render_plan.py <map_dir> <out.png> --plan plan.json`: offline PNG of a map and plans (removals in red).
 - `testenv/make_fixtures.py screen|build|sprawl|readme`: rebuild `testenv/fixtures/` (planner unit-test inputs; `sprawl 4004` = the
   synthetic planner-v2 map with far-apart ore and old builds in the middle).
 
-Companion test overrides: `FACTORIO_COMPANION_LOCK_PORT`, `FACTORIO_GAME_MATCH`, `FACTORIO_EXIT_AFTER`,
+Companion test overrides: `FACTORIO_CONFIG` (a config file instead of `config.json`), `FACTORIO_AUTOPILOT_JOURNAL`,
+`FACTORIO_AUTOPILOT_THREAD=0` (no autopilot thread), `FACTORIO_COMPANION_LOCK_PORT`, `FACTORIO_GAME_MATCH`, `FACTORIO_EXIT_AFTER`,
 `FACTORIO_CHAT_DIR`, `FACTORIO_PLANS_DIR`, `FACTORIO_FAKE_CLAUDE`, `--no-exit-check`.
 
 ## Verified Factorio 2.1 facts
@@ -177,6 +189,27 @@ Checked in this engine; please don't "fix" code that relies on them:
   helper took apart 17 plate chests full of plates at S5 and stopped crafting the last 12 belts). The helper now
   stores its surplus in chests of its own before it fetches or crafts, and gives up a craft that waits on a full
   inventory for 10 s.
+- Autopilot (round 1 engine checks, `tests/live_autopilot*.py`): `ghost.revive{raise_revive = true}` raises
+  `script_raised_revive` with the ghost's tags (the autopilot's owned set comes from `tags.claude_plan`);
+  `game.get_entity_by_unit_number` returns nil for assemblers and chests (only prototypes flagged get-by-unit-number),
+  so the mall's machines and chests are kept by position; an assembler whose output nothing takes reports
+  `entity_status.full_output` (the only assembler output the helper takes: surplus, never a running line's);
+  a Lua command over RCON runs in the level's own `storage`, not the mod's (read mod state through its ops).
+- Autopilot round 2 blocks (`tests/live_expand_blocks.py`): the mall row (iron side-loaded onto belt A's north lane
+  behind a stub belt, gears dropped from the north onto its south lane, circuits on belt B, three inserters from
+  the cable to the circuit assembler, two iron inputs into the gear assembler) fills every chest in 15 game minutes
+  with no lane mixing (34 drills, 30 assemblers, 100 inserters, 123 belts from plates alone); a smelting column whose
+  two plate belts turn inward at the top and side-load onto one belt from both sides puts plates on both of its
+  lanes (no straightener needed: a belt with two side inputs and no back input stays straight); a long-handed
+  inserter beside a two-belt bus picks only from the far belt (copper over iron).
+- Autopilot round 3 (`tests/live_expand_blocks.py`): without a depot at its end the mall's belt A backs up (iron on
+  its north lane, gears on its south lane) and every chest still fills (400 belts in the 4-stack chest in 30 game
+  minutes); basic oil processing takes crude in the refinery's 2nd input (the east one facing north) and gives
+  petroleum from its 3rd output (east), the recipe's `fluidbox_index` counted among the machine's input or output
+  boxes (`blocks.oil_plant_block` made 253 plastic in 5 game minutes from crude and coal); a powered pumpjack on a
+  crude-oil well finishes the Oil processing trigger tech by itself (its fluid box filling is enough, no pipe needed).
+  An assembler fed by one inserter reports `item_ingredient_shortage` most of the time between crafts and still makes
+  its ~50 items/min: `products_finished` tells whether it is making anything.
 - Planner v2 ETA model vs the real helper (`tests/live_onsite.py`, `acceptance.py --no-cheat`, no debug ops): first
   plates 1.52 min measured vs 1.5 predicted on a real-save copy (quick start, 60 plates/min held), 8.2-14.7 min vs
   9.0-13.0 predicted from an empty inventory on the fixture seeds.

@@ -561,9 +561,10 @@ def test_labs_use_what_the_assemblers_make():
     mp = master(2002, "hub")
     assert sum(1 for e in M.stage_entities(mp, 3) if e.name == "lab") == 10
     sn = M.science_note(mp, gd)
-    # S3: the burner phase's iron (side A of the column, ~30/min) caps red at 15/min; the 10 labs use it all
-    assert sn["after_S3"]["labs"] == 10 and sn["after_S3"]["red_per_min"] == pytest.approx(15)
-    assert sn["after_S3"]["labs_use_per_unit_time"]["30s"] == pytest.approx(15)
+    # S3: the burner phase's iron (side A of the column, ~30/min) caps red at 15/min, promised at SUPPLY_EFF (90%:
+    # acceptance seed 3003 measured 13.2/min there); the 10 labs use it all
+    assert sn["after_S3"]["labs"] == 10 and sn["after_S3"]["red_per_min"] == pytest.approx(15 * M.SUPPLY_EFF)
+    assert sn["after_S3"]["labs_use_per_unit_time"]["30s"] == pytest.approx(15 * M.SUPPLY_EFF)
     r4 = M.stage_rates(mp, gd, 4)
     assert r4["automation-science-pack"] == pytest.approx(30)        # S4's electric drills: the full 30/min
     assert 10 * 60 / 20 >= r4["automation-science-pack"]             # 10 labs use 30/min on techs up to 20 s

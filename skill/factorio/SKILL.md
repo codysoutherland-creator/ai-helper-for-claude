@@ -106,6 +106,33 @@ Deterministic code does the layout; you pick, explain and orchestrate. Never han
   player insists). Pass `plan="<short id>"` when placing a few ghosts by hand, so `factorio_clear_claude_ghosts` can
   remove them.
 
+## Doctrine (how to play well)
+
+`{{INSTALL_DIR}}/skill/factorio/doctrine.md` holds the rules and numbers the planner and the autopilot use, checked
+against the game's own data: automation first (hand-craft only to bootstrap, build a mall as soon as the electric
+drills go in, bulk items come from the mall, every craft counts against a 120 s per 10 min budget), the helper's
+material order (inventory, mall, surplus output, chests, wait at a mall machine, then small crafts), research order
+and trigger techs (red science needs a lab crafted by the PLAYER; Oil processing needs a pumpjack pumping crude), oil
+ratios (1 basic refinery : ~0.45 plastic plants), ratios (assembler and
+furnace output, 24 stone furnaces or 15 electric drills per yellow lane, steam 1:20:40), organization (one-way flows,
+smelting columns, a bus with planned lanes and reserved width, a separate mall, a 32-tile grid) and scale (size to a
+target in science/min, build for 2x, reserve 2-4x, expand vs rebuild). Read it before advising on layout or growth.
+
+## Autopilot ("Let Claude play")
+
+The host can let Claude play by itself: the Helper tab's **Let Claude play** checkbox or `@claude autopilot on|off|
+status` (free). The companion then runs the loop (observe, deterministic rules, planner builds approved by the mod
+after a grace period, a few paced Claude decisions per hour). From here, `factorio_autopilot(on=...)` switches it
+(only when the player asks) and `factorio_autopilot_report()` summarises its journal. Past the starter base it grows
+the same master plan with expansion stages (planner/expand.py): S4m = the mall (one assembler row fed by its own
+taps on the starter base's plate lines; its chests are the helper's first material source, so it comes right after
+the electric drills), then more steam power, a straight plate bus with smelting cells at the ore (laid by the steel
+column), a second red + green science block downstream of the mall's taps, and oil (pumpjacks, then a refinery and a
+plastic plant). Feeds stay short and straight (doctrine ORG-8). When nothing is left that it can build it says "Done
+for this version" once and idles. `plan_roadmap(master)` lists the stages like any stage. Do not fight it: while it is on,
+don't approve or reject its plans (cards tagged "Autopilot") unless the player asks; plans you propose stay the
+player's to approve.
+
 ## Ground rules
 
 - Coordinates: tiles, x → right, **y → down**. Entity positions are centers: 1x1 at `.5`, 2x2 on whole numbers, 3x3 at `.5`.
@@ -168,4 +195,5 @@ Goal: explain problems, fix the obvious ones, and tell the player about the rest
   `blueprint_place` stamps small ones as ghosts directly (mode `forced` clears trees; > 50 entities is refused
   unless `allow_large=True` — use the planner for bases).
 - Ratios to remember: 1 yellow belt = 15/s; stone/steel furnace 0.3125/0.625 plate/s → 48/24 furnaces per yellow belt;
-  green circuit 3 copper cable : 2 cable assemblers per 3 circuit assemblers (asm2); 1 boiler : 2 steam engines; 1 offshore pump : 20 boilers.
+  3 copper cable assemblers : 2 circuit assemblers; 1 boiler : 2 steam engines; 1 offshore pump : 20 boilers. The full,
+  game-checked numbers are in the doctrine (above).

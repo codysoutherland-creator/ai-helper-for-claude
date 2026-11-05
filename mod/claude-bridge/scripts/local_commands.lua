@@ -6,6 +6,7 @@ local foreman = require("scripts.foreman")
 local blueprint_gen = require("scripts.blueprint_gen")
 local transport = require("scripts.transport")
 local util = require("scripts.util")
+local autopilot = require("scripts.autopilot")
 
 local local_commands = {}
 
@@ -56,7 +57,8 @@ local function help_text()
     "  spawn | come | follow | stop | dismiss\n" ..
     "  wood [n] | stone [n] | iron [n] | copper [n] | coal [n]  (mine near you)\n" ..
     "  build (ghosts near you) | refuel | give (all its items) | take (item in your hand)\n" ..
-    "  status | alerts | blueprint <kind> [count] [param=value]" ..
+    "  status | alerts | blueprint <kind> [count] [param=value]\n" ..
+    "  autopilot on | off | status  (let Claude play by itself; host only)" ..
     (#ids > 0 and ("  kinds: " .. table.concat(ids, ", ")) or "") .. "\n" ..
     "Anything else is sent to Claude (uses tokens)."
 end
@@ -128,11 +130,35 @@ local function blueprint_cmd(player, words)
   return true, (k.title or k.id) .. " blueprint is in your cursor."
 end
 
+-- "autopilot on|off|status" and "let claude play" (free; on/off only for the host)
+local function autopilot_cmd(player, verb)
+  if verb == "on" or verb == "off" then
+    local ok, msg = autopilot.set(verb == "on", player)
+    if not ok then return "Only the host can do that." end
+    return msg
+  end
+  local s = storage.autopilot
+  if not (s and s.on) then return "The autopilot is off. The host can say @claude autopilot on (or: let claude play)." end
+  local ms = s.milestones or {}
+  return (autopilot.status_line() or "Autopilot on.") .. (#ms > 0 and ("\nLast: " .. ms[#ms].text) or "")
+end
+local_commands.autopilot = autopilot_cmd
+
 -- -> handled:boolean, reply:string
 function local_commands.try(player, text)
   local words = {}
   for w in text:lower():gsub("[^%w%s_=%.%-]", " "):gmatch("%S+") do words[#words + 1] = w end
   if #words == 0 then return true, help_text() end  -- bare "@claude"
+  if words[1] == "autopilot" and #words <= 2 then
+    local verb = words[2] or "status"
+    if verb == "on" or verb == "off" or verb == "status" or verb == "start" or verb == "stop" then
+      verb = ({start = "on", stop = "off"})[verb] or verb
+      return true, autopilot_cmd(player, verb)
+    end
+  end
+  if words[1] == "let" and words[2] == "claude" and words[3] == "play" and #words <= 4 then
+    return true, autopilot_cmd(player, "on")
+  end
   while #words > 1 and lead[words[1]] and (actions[words[2]] or words[2] == "blueprint") do table.remove(words, 1) end
   local cmd = words[1]
 

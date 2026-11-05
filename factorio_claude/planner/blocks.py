@@ -1147,3 +1147,195 @@ def _green_part(G, S, y0, Yg, belt="transport-belt"):
     put(belt, S + 13, yt + 4, WEST, role="feed_in", row=yt + 4)         # copper: port (S+13, Yg+5) below it
     ports = [Port("belt_in", "iron-plate", S + 10, Yg + 5, NORTH), Port("belt_in", "copper-plate", S + 13, Yg + 5, NORTH)]
     return E, ports
+
+
+# ---- autopilot round 2: the mall (docs/design/AUTOPILOT.md section 8.1) ---------------------------------------------
+# One row of assembling machines 1 along two belts, everything flowing EAST (canonical). Rows:
+#   0 output chests (inventory bar limited)   1 output inserters   2-4 the machines (pitch 4, gap column x0+3)
+#   5 input inserters: a regular one at x0 (belt A) and a long-handed one at x0+1 (belt B)
+#   6 belt A: iron plates on the north (left) lane, gears on the south (right) lane
+#   7 belt B: electronic circuits
+# Head (west end): a copper cable AM (copper from a short belt that ends under it) feeds a circuit AM by direct
+# insertion; the circuit AM drops circuits on belt B; the gear AM drops gears on belt A's south lane. Iron enters belt A
+# by side-loading from the north, so it only ever fills the north lane (a full iron lane can never block the gears:
+# no mixed-lane deadlock). Direct-insertion neighbours: belt AM -> splitter AM (west) and underground AM (east), pipe
+# AM -> steam engine AM (east). A plate depot chest at the end of belt A holds iron plates and gears for the helper.
+# What the helper needs most comes first on the belts (upstream machines get the plates, gears and circuits first).
+# Round 3: no splitter (the helper never needed one in 3-hour runs, but its machine sat first on the circuit belt and
+# took 250 circuits and 200 belts to fill its chest while inserters ran short); the circuit users are the inserter
+# group (long-handed and fast inserters by direct insertion from the inserter machine, downstream of it), then drills
+# and assemblers. The belt machine has two input and two output inserters (~100 belts/min, its own two chests).
+MALL_SLOTS = ("transport-belt", "underground-belt", "long-handed-inserter", "inserter", "fast-inserter",
+              "electric-mining-drill", "assembling-machine-1", "pipe", "steam-engine", "iron-chest")
+MALL_DOUBLE = ("transport-belt",)      # a second input (plates and gears) and a second output into a second chest
+# circuit users with a second belt-A input (smoke runs: one inserter's ~0.83 items/s of iron and gears held the
+# assembler machine to ~3.5 assemblers/min and the inserter machine to ~25 inserters/min; both ran short)
+MALL_DOUBLE_A = ("inserter", "electric-mining-drill", "assembling-machine-1")
+MALL_HEAD = 13                       # x of the first item machine
+MALL_PITCH = 4
+MALL_H = 8
+# per item: (needs circuits from belt B, direct-insertion source item or None, its side: -1 west / +1 east)
+MALL_INPUTS = {"inserter": (True, None, 0), "splitter": (True, "transport-belt", 1),
+               "transport-belt": (False, None, 0), "underground-belt": (False, "transport-belt", -1),
+               "pipe": (False, None, 0), "steam-engine": (False, "pipe", -1),
+               "electric-mining-drill": (True, None, 0), "assembling-machine-1": (True, None, 0),
+               "burner-inserter": (False, None, 0), "long-handed-inserter": (False, "inserter", -1),
+               "fast-inserter": (True, "inserter", 1), "iron-chest": (False, None, 0)}
+MALL_STACKS = {"electric-mining-drill": 1, "assembling-machine-1": 1, "steam-engine": 1, "underground-belt": 1,
+               "splitter": 1, "fast-inserter": 1, "long-handed-inserter": 1, "iron-chest": 1, "transport-belt": 4}
+#   (belts: the helper's biggest need by far - 1,650+ per 3 game hours - so their chest holds 400)
+MALL_GATE = {"splitter": "logistics", "underground-belt": "logistics", "fast-inserter": "fast-inserter"}
+
+
+def mall_block(gd=None, items=None, *, extra_slots=2, chest="iron-chest", belt="transport-belt",
+               pole="small-electric-pole", depot=False) -> Block:
+    """The mall v1 row (AUTOPILOT.md 8.1). items: which of MALL_SLOTS to build (default all; an item whose
+    direct-insertion source is missing is dropped). Slots of items not built stay empty, and `extra_slots` more machine
+    slots are reserved at the east end (info["reserve"]). Entity extras: role head_am / mall_am (unit = item),
+    mall_in / mall_long / mall_out / mall_link / head_* inserters, mall_chest (item, bar = inventory slots), depot,
+    belt_a / belt_b / cu_feed / fe_feed / stub belts, mall_pole. Ports: iron-plate belt_in at (-1, 5) and copper-plate
+    belt_in at (-1, 7), both flowing east. info["chests"] = local (x, y) of every output chest (the helper's mall
+    sources). depot: a chest at the end of belt A that takes whatever reaches it. Off by default since round 3: it
+    drained belt A, so the gear machine at the head never backed up and turned the mall's iron into a chest of gears
+    while the belt and inserter machines downstream starved (live: 226 gears, 4 iron plates, 0-14 belts). Without it
+    belt A backs up: each machine takes what it needs and the plate taps only move what the row uses."""
+    G = _geo(gd)
+    want = [i for i in MALL_SLOTS if items is None or i in items]
+    present = set(want)
+    for it in list(want):     # a direct-insertion item needs its neighbour
+        src = MALL_INPUTS[it][1]
+        if src and src not in present:
+            want.remove(it)
+            present.discard(it)
+    am, ins, lng = "assembling-machine-1", "inserter", "long-handed-inserter"
+    E = []
+
+    def put(name, x, y, d=NORTH, role="", recipe=None, **kw):
+        e = _put(G, name, x, y, d, recipe=recipe, extra=_r(role, **kw))
+        E.append(e)
+        return e
+    chests = []
+
+    def chest_at(x, item, stacks=2):
+        stack = int((G.raw.get("items") or {}).get(item, {}).get("stack_size") or 50) if hasattr(G, "raw") else 50
+        put(chest, x, 0, role="mall_chest", unit=item, bar=stacks, holds=stacks * stack)
+        chests.append((x + 0.5, 0.5, item))
+
+    # head: copper cable (x 1-3) -> circuit (x 5-7) -> belt B; gear (x 9-11) -> belt A south lane
+    put(am, 1, 2, recipe="copper-cable", role="head_am", unit="copper-cable")
+    put(lng, 2, 5, SOUTH, role="head_cu", unit="copper-cable")               # copper belt end (2, 7) -> cable AM
+    for y in (2, 3, 4):                                                      # cable AM -> circuit AM (3 cable/circuit)
+        put(ins, 4, y, WEST, role="head_link", unit="copper-cable")
+    put(am, 5, 2, recipe="electronic-circuit", role="head_am", unit="electronic-circuit")
+    put(ins, 5, 5, SOUTH, role="head_fe", unit="electronic-circuit")         # iron from belt A
+    put(lng, 6, 5, NORTH, role="head_out", unit="electronic-circuit")        # circuits onto belt B
+    put(ins, 6, 1, SOUTH, role="mall_out", unit="electronic-circuit")
+    chest_at(6, "electronic-circuit", 1)
+    put(am, 9, 2, recipe="iron-gear-wheel", role="head_am", unit="iron-gear-wheel")
+    put(ins, 9, 5, SOUTH, role="head_fe", unit="iron-gear-wheel")            # two iron inputs: 2 plates per gear
+    put(ins, 11, 5, SOUTH, role="head_fe", unit="iron-gear-wheel")
+    put(ins, 10, 5, NORTH, role="head_out", unit="iron-gear-wheel")          # gears onto belt A (far = south lane)
+    put(ins, 10, 1, SOUTH, role="mall_out", unit="iron-gear-wheel")
+    chest_at(10, "iron-gear-wheel", 1)
+    for x in (3, 7, 12):
+        put(pole, x, 5, role="mall_pole", unit=x)
+    for x in (4, 8, 12):
+        put(pole, x, 1, role="mall_pole", unit=x)
+    last_circ = 6                       # belt B must end where the last circuit consumer picks
+    slots = {}
+    for i, item in enumerate(MALL_SLOTS):
+        x0 = MALL_HEAD + MALL_PITCH * i
+        slots[item] = x0
+        if item not in present:
+            continue
+        circ, src, side = MALL_INPUTS[item]
+        put(am, x0, 2, recipe=item, role="mall_am", unit=item)
+        put(ins, x0, 5, SOUTH, role="mall_in", unit=item)
+        if circ:
+            put(lng, x0 + 1, 5, SOUTH, role="mall_long", unit=item)
+            last_circ = x0 + 1
+        put(ins, x0 + 1, 1, SOUTH, role="mall_out", unit=item)
+        chest_at(x0 + 1, item, MALL_STACKS.get(item, 2))
+        if item in MALL_DOUBLE and not circ:
+            put(ins, x0 + 1, 5, SOUTH, role="mall_in", unit=item)
+            put(ins, x0, 1, SOUTH, role="mall_out", unit=item)
+            chest_at(x0, item, MALL_STACKS.get(item, 2))
+        if item in MALL_DOUBLE_A and circ:
+            # a second belt-A input (iron + gears: 14 of an assembler's 17 items, the bottleneck of one inserter);
+            # the slot's row-5 pole moves into the gap column
+            put(ins, x0 + 2, 5, SOUTH, role="mall_in", unit=item)
+            put(pole, x0 + 3, 5, role="mall_pole", unit=x0 + 3)
+        else:
+            put(pole, x0 + 2, 5, role="mall_pole", unit=x0 + 2)
+        put(pole, x0 + 3, 1, role="mall_pole", unit=x0 + 3)
+    for item in present:                # direct insertion into the item machine from its neighbour
+        circ, src, side = MALL_INPUTS[item]
+        if src:
+            x0, xs = slots[item], slots[src]
+            gap = max(x0, xs) - 1       # the gap column between the two machines
+            put(ins, gap, 3, EAST if xs > x0 else WEST, role="mall_link", unit=item)
+    x_end = MALL_HEAD + MALL_PITCH * max(i for i, it in enumerate(MALL_SLOTS) if it in present or i == 0) + 3
+    # belts
+    put(belt, 0, 5, EAST, role="fe_feed", row=5)
+    put(belt, 1, 5, SOUTH, role="fe_feed", row=5)          # side-loads onto belt A's north lane
+    put(belt, 0, 6, EAST, role="stub", row=6)              # behind belt A's first tile: (1, 5) side-loads, not curves
+    for x in range(1, x_end + 1):
+        put(belt, x, 6, EAST, role="belt_a", row=x)
+    for x in (0, 1, 2):
+        put(belt, x, 7, EAST, role="cu_feed", row=x)       # ends under the cable AM's long inserter
+    for x in range(4, last_circ + 1):
+        put(belt, x, 7, EAST, role="belt_b", row=x)
+    if depot:                                              # iron plates + gears for the helper
+        put(ins, x_end + 1, 6, WEST, role="depot_in")
+        put(chest, x_end + 2, 6, role="depot", holds=0)
+        chests.append((x_end + 2.5, 6.5, "iron-plate"))
+        put(pole, x_end + 1, 5, role="mall_pole", unit=x_end + 1)
+    w = x_end + 3
+    ports = [Port("belt_in", "iron-plate", -1, 5, EAST), Port("belt_in", "copper-plate", -1, 7, EAST)]
+    b = Block("mall_block", E, (w, MALL_H), ports)
+    reserve_w = w + MALL_PITCH * max(0, extra_slots)
+    b.info = {"items": [i for i in MALL_SLOTS if i in present], "chests": chests, "slots": slots,
+              "reserve": [("mall", (0, 0, reserve_w, MALL_H + 2))], "x_end": x_end}
+    b.rates = {"power_kw": round(sum(75 for e in E if e.name == am), 1)}
+    return _finish(b, gd)
+
+
+# ---- autopilot round 3: oil (docs/design/AUTOPILOT.md 8.2, roadmap G9) -----------------------------------------------
+# One oil refinery on basic oil processing (100 crude -> 45 petroleum per 5 s = 9/s) and one chemical plant on plastic
+# (20 petroleum + 1 coal -> 2 plastic per 1 s: the refinery keeps it ~45% busy, ~54 plastic/min). Canonical, north up:
+#   row 0      coal belt (port: belt_in at (-1, 0) flowing east), ends under the plant's coal inserter
+#   row 1      coal inserter (x 1) picking from the belt, dropping into the plant
+#   rows 2-4   chemical plant facing south (its two fluid inputs on row 5), plastic out east: inserter (3, 3) -> chest
+#   row 5      petroleum header: pipes x 0..4 (the plant's inputs at x 0 and x 2)
+#   row 6      pipe at x 4: the refinery's petroleum output - its 3rd output box (the recipe's fluidbox_index 3: heavy,
+#              light, petroleum from west to east when it faces north); x 0 / x 2 (heavy, light) stay unconnected
+#   rows 7-11  oil refinery facing north; crude enters its input 2 (fluidbox_index 2, the east input) from (3, 12)
+#              (port: pipe_in flowing north)
+# Not mirrorable (the refinery's outputs are not symmetric); rotations are fine.
+def oil_plant_block(gd=None, *, chest="iron-chest", belt="transport-belt") -> Block:
+    G = _geo(gd)
+    E = []
+
+    def put(name, x, y, d=NORTH, role="", recipe=None, **kw):
+        e = _put(G, name, x, y, d, recipe=recipe, extra=_r(role, **kw))
+        E.append(e)
+        return e
+    put(belt, 0, 0, EAST, role="coal_feed", row=0)
+    put(belt, 1, 0, EAST, role="coal_feed", row=1)
+    put("inserter", 1, 1, NORTH, role="oil_coal_in")                 # picks from the belt (north), drops south
+    put("chemical-plant", 0, 2, SOUTH, role="oil_chem", recipe="plastic-bar")
+    out_ins = "fast-inserter" if buildable(gd, "fast-inserter") else "inserter"    # ~0.9 plastic/s leaves the plant
+    put(out_ins, 3, 3, WEST, role="oil_out", item="plastic-bar")     # picks from the plant (west), drops east
+    put(chest, 4, 3, role="depot", item="plastic-bar", holds=0, bar=2)
+    for x in range(5):
+        put("pipe", x, 5, role="oil_pipe")
+    put("pipe", 4, 6, role="oil_pipe")
+    put("small-electric-pole", 3, 2, role="oil_pole")
+    put("small-electric-pole", 1, 6, role="oil_pole")      # (0, 6) / (2, 6) stay empty: heavy / light oil outputs
+    put("oil-refinery", 0, 7, NORTH, role="oil_refinery", recipe="basic-oil-processing")
+    ports = [Port("belt_in", "coal", -1, 0, EAST), Port("pipe_in", "crude-oil", 3, 12, NORTH)]
+    b = Block("oil_plant", E, (5, 12), ports)
+    b.info = {"chests": [(4.5, 3.5, "plastic-bar")], "reserve": [("oil_plant", (0, 0, 9, 12))]}
+    b.rates = {"plastic-bar": 54.0, "coal": -27.0, "crude-oil": -1200.0,
+               "power_kw": round(420 + 210 + 2 * 13.2, 1)}
+    return _finish(b, gd)

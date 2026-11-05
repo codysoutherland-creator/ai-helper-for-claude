@@ -112,6 +112,79 @@ Chat works too: `@claude help` lists the free keyword commands (`@claude wood 20
    appears as a normal card to preview and approve. In Claude Code, `plan_next_stage(master)` does the same on demand
    and `plan_roadmap(master)` shows every stage's status.
 
+### Let Claude play (autopilot)
+
+Turn on **Let Claude play** at the top of the Helper tab (host only), or type `@claude autopilot on` (also just
+`let claude play`) in chat. Claude then plays by itself with no further input:
+
+- It looks at the base (research, production, power, problems, the helper), picks the next goal from a roadmap
+  (restore the base, the starter base through automated red and green science, a mall, more steam power, steel on a
+  plate bus, tier 2 research, a second science block, then oil: pumpjacks, a refinery and plastic), queues research,
+  has the planner design each build, approves its **own** plans after a 30 s wait (the card and chat say "Autopilot
+  builds ... in 30 s"; Reject in the Plans tab stops it), has the helper build them, checks they run and fixes what it
+  can (refuelling, a power grid cut off by a missing pole, a helper that stopped).
+- A status line next to the Claude button shows the goal, the next step, the Claude calls this hour and the helper's
+  hand-craft share (`Autopilot: G1 starter base > S3 waits for automation | 2/6 calls | hand 12%`). Chat only gets a
+  line at milestones. `@claude autopilot status` and the Helper tab's **Show log** list the last milestones.
+- It never takes apart your builds (unless you allow it in the mod settings), never builds within 16 tiles of you or
+  of anything you built in the last 15 minutes, and uses no cheats: the helper builds from real items. While it plays,
+  the helper does not take items out of your inventory (mod setting).
+- Routine work is free (code, not Claude). Claude is asked only for real decisions (two close layouts, which goal next
+  when several are open, being stuck, an hourly review): at most 6 calls per hour by default, never while the game is
+  paused, and fewer when nothing changes. On a Claude subscription that costs no extra money but counts toward your
+  usage.
+- Pausing the game pauses it; switching it off (checkbox, **Stop now**, or `@claude autopilot off`) stops it at once
+  and cancels its queued builds (ghosts already placed stay). It is saved with the map and picks up again after a load.
+- **Automation first.** The mall comes as soon as the electric drills go in, before green science: one row of
+  assemblers that makes belts (about 100 a minute), undergrounds, inserters (also fast and long-handed), electric drills,
+  assemblers, pipes, steam engines and iron chests into limited chests, fed by its own short taps on your starter
+  base's iron and copper lines. From then on the helper takes building materials from the mall (and other chests and
+  machine output) and waits at a mall machine that is making what it needs; it hand-crafts at most 120 crafting
+  seconds per 10 game minutes, and an item the mall makes only gets a short top-up. Automation's 10 red packs, the
+  first labs and wood poles are the bootstrap exceptions. Red science research needs **one lab crafted by you** (the
+  game's trigger; a lab the helper crafts does not count): the autopilot asks for it once.
+- Claude uses a built-in Factorio doctrine (automation first, ratios, organization and scale):
+  [factorio_claude/knowledge/doctrine.md](factorio_claude/knowledge/doctrine.md).
+
+**Organization and scale.** After the mall the base grows the organized way: a straight **plate bus** (iron and
+copper, with room for 8 lanes), laid by the first block that needs it (steel) and fed by **smelting cells** at the ore
+(electric drills, a smelting column at their head) when a patch is within ~64 belt tiles, or else by taps on the
+starter base's surplus. Steel and a second red + green science block (+30/min each, with its own iron cell when a
+patch is in reach) hang off the bus downstream of everything the mall takes, so the mall always gets the first pick.
+Feeds stay short and straight: a route longer than 1.4x its straight-line distance + 12 tiles, or with more than 6
+turns, is refused and the next spot is tried. More steam power goes into the room the starter base reserved. Once Oil
+gathering is researched it puts pumpjacks on the nearest crude oil (pumping crude finishes Oil processing), then a
+refinery on basic oil processing and a chemical plant making plastic near a coal belt, with crude piped in. Every new
+block is appended to the same master plan as a new stage (S4m, S6, S7, ...), never replaces it. Blue science is not
+in this version yet: when everything it can build is built and no research is left, it says so once ("Done for this
+version: next would be ...") and keeps the base running, without spending Claude calls. While the planner works on a
+sped-up test game (game.speed above 1) the game runs at normal speed until the plan is ready. Mod settings (Map): may
+take apart your builds (off), keep-out radius (16), seconds before it builds (30), helper may take from my inventory
+(off), Claude calls per hour (6). `config.json`: `autopilot` (true: the companion runs the loop),
+`autopilot_calls_per_hour`, `autopilot_min_gap_s` (180), `autopilot_min_gap_game_s` (300), `autopilot_model` (default
+`chat_model`). Its journal is `logs/autopilot.jsonl`; in Claude Code, `factorio_autopilot` switches it and
+`factorio_autopilot_report` summarises the journal.
+
+**What it did in testing, and known limitations (0.6.0).** Measured on a test server at game speed 10 with real
+Claude calls and no other input, peaceful mode, for about 3.2 game hours each: on a mid-game save it went from 4 to 27
+techs, automated red and green science (about 30/min each), grew from about 75 to 300 iron plates/min and from
+35 kW to about 3.6 MW, and kept all 1113 of the player's entities. On an empty synthetic map it reached automated red
+and green science, 26 new techs and about 2100 entities. Claude was called 4-5 times per real hour (cap 6). Not yet
+good enough:
+- **Layout is not yet organized at base scale.** Each block it adds (mall row, science rows, steel row) is compact
+  and straight, but the base as a whole is not: the starter base's hub layout can still run 100+ tile ore and plate
+  belts from a far patch, there can be belt loops around ore patches, and the second science block can hang off one
+  long belt. There is no real main bus with reserved lanes yet, and no smelting columns at every patch.
+- **The second science block does not raise science.** It gets built, but in both test runs science stayed at about
+  30/min (the 60/min goal was never reached); it is most likely short of plates. Not diagnosed yet.
+- **More power can run out of room.** "power_grow does not fit here" means the reserved power room is used up; the
+  power-growth goal is then dropped.
+- **The mall is undersized.** It runs out of inserters and assemblers often, so the helper still hand-crafts those
+  (hand-craft share in the last tested hour: about 22-25%, down from 100% before the mall).
+- **It can plateau.** Without crude oil in reach it builds nothing more and only keeps researching. Blue science is
+  not implemented.
+- Pausing stops it, but that was only tested in unit tests, not in a live game.
+
 ### Cost gate
 
 Off by default: on a Claude subscription a request costs no extra money, so Claude just runs. Set
@@ -136,12 +209,14 @@ In Claude Code you can still say "check my base", "set me up with a starter base
 
 | Piece | Where | What |
 |---|---|---|
-| `claude-bridge` mod (0.5.0) | `mod/claude-bridge` (linked into Factorio's `mods` folder: `%APPDATA%\Factorio`, `~/Library/Application Support/factorio`, `~/.factorio`) | GUI, free helper/foreman/blueprints, plan overlay + tagged ghost placement (`scripts/plans.lua`), map/game-data export to script-output, UDP + `/claude <json>` RCON API, Claude inbox |
+| `claude-bridge` mod (0.6.0) | `mod/claude-bridge` (linked into Factorio's `mods` folder: `%APPDATA%\Factorio`, `~/Library/Application Support/factorio`, `~/.factorio`) | GUI, free helper/foreman/blueprints, plan overlay + tagged ghost placement (`scripts/plans.lua`), map/game-data export to script-output, UDP + `/claude <json>` RCON API, Claude inbox |
 | planner | `factorio_claude/planner/` | world model (`world.py`, `grid.py`), game data (`gamedata.py`), rate solver (`rates.py`), verified blocks (`blocks.py`), A* belt/pipe router + pole placer (`router.py`), master plans (planner v3: `master.py`), starter-base placer (`placer.py`, `plan.py`), staged on-site planner with state, bill/ETA and rebuild review (`staged.py`, `onsite.py`, `state.py`, `cost.py`, `agenda.py`, `existing.py`, `stage2.py`), quality gates (`quality.py`), static validator (`validate.py`) |
 | launcher | `launcher.py` (Windows shortcut: `pythonw launcher.pyw`; macOS: `Factorio (Claude).app`; Linux: menu entry) | starts Factorio with `--enable-lua-udp 34500 ...` (the game binary directly when Steam is already running or for a standalone copy, else `steam -applaunch 427520`) + companion |
 | platform paths | `factorio_claude/platforms.py` | Factorio user dir, Steam/Factorio/Claude Code discovery, venv python, detached processes, dialogs, clipboard per OS |
 | installers | `install.sh` (macOS/Linux), `install.ps1` (Windows) -> `install.py` | one-line bootstrap, then the cross-platform setup (`--check`, `--uninstall`) |
 | companion | `factorio_claude/companion.py` | hidden; polls the inbox, cost gate, answers with lean `claude -p` calls (`chat_model`, short planner-first prompt, pre-fetched context); log `logs/companion.log` |
+| autopilot | `factorio_claude/autopilot.py`, `autopilot_rules.py`, mod `scripts/autopilot.lua` | "Let Claude play": the loop in the companion (observe, rules, paced Claude decisions), the switch, self-approval and safety checks in the mod; journal `logs/autopilot.jsonl` |
+| knowledge | `factorio_claude/knowledge/` | the doctrine (rules, game facts checked against the game data, ratios, layout and scale conventions) and the autopilot roadmap; `doctrine.md` is generated |
 | link | `factorio_claude/link.py` | UDP client (chunked), RCON fallback |
 | MCP server `factorio` | `factorio_claude/server.py` via `run_server.py` (user scope) | observe, act, blueprints, agent, quick actions, foreman report; planner tools `plan_starter_base`, `plan_roadmap`, `plan_next_stage`, `world_summary`, `plan_preview`, `plan_validate`, `plan_apply`, `plan_helper`, `plan_list` |
 | Skill | `~/.claude/skills/factorio/SKILL.md` | playbooks for Claude Code |

@@ -18,6 +18,7 @@ local agent = require("scripts.agent")
 local foreman = require("scripts.foreman")
 local blueprint_gen = require("scripts.blueprint_gen")
 local plans = require("scripts.plans")
+local autopilot = require("scripts.autopilot")
 
 local gui = {}
 
@@ -117,7 +118,70 @@ end
 
 local build_tab, refresh_tab = {}, {}
 
+-- the autopilot row at the top of the Helper tab: "Let Claude play" (host only), its state, Show log / Stop now
+local function build_autopilot_row(player, c)
+  local f = c.add{type = "frame", name = "claude_ap_frame", style = "bordered_frame", direction = "vertical"}
+  f.style.horizontally_stretchable = true
+  local row = f.add{type = "flow", name = "claude_ap_row", direction = "horizontal"}
+  row.style.vertical_align = "center"
+  local host = access.is_host(player)
+  row.add{type = "checkbox", name = "claude_ap_toggle", caption = "[font=default-bold]Let Claude play[/font]",
+    state = autopilot.is_on(), enabled = host,
+    tooltip = host and ("Claude plays by itself: it plans builds, approves its own plans after a short wait (you " ..
+      "can still Reject them in the Plans tab), has the helper build them, queues research and keeps going. It " ..
+      "never takes apart your builds or builds next to you, and uses no cheats. Uses your Claude subscription " ..
+      "(paced: a few calls per hour).") or "Only the host can switch the autopilot on or off."}
+  local sp = row.add{type = "empty-widget"}
+  sp.style.horizontally_stretchable = true
+  row.add{type = "button", name = "claude_ap_log", caption = "Show log", tooltip = "The autopilot's last milestones."}
+  row.add{type = "button", name = "claude_ap_stop", caption = "Stop now", style = "red_button", enabled = host,
+    tooltip = "Switch the autopilot off now (its queued builds are cancelled; ghosts already placed stay)."}
+  local info = wrap_label(f, "claude_ap_info", "")
+  info.style.font_color = {0.8, 0.8, 0.8}
+  local lg = wrap_label(f, "claude_ap_log_text", "")
+  lg.visible = false
+end
+
+local function autopilot_info(st)
+  local s = storage.autopilot
+  if not (s and s.on) then
+    return "Off. Turn it on and Claude builds and researches by itself."
+  end
+  local line = autopilot.status_line() or ""
+  local q = 0
+  for _ in pairs(s.approve_queue or {}) do q = q + 1 end
+  local lines = {(line:gsub("^Autopilot: ", "On: "))}
+  if s.phase then lines[#lines + 1] = "Phase: " .. tostring(s.phase) .. (q > 0 and (" | " .. q .. " plan(s) waiting to be built") or "") end
+  if s.note and s.note ~= "" then lines[#lines + 1] = tostring(s.note) end
+  return table.concat(lines, "\n")
+end
+
+local function autopilot_log_text()
+  local s = storage.autopilot
+  local ms = s and s.milestones or {}
+  if #ms == 0 then return "No milestones yet." end
+  local out = {}
+  for i = #ms, math.max(1, #ms - 19), -1 do
+    out[#out + 1] = "[color=0.6,0.6,0.6]" .. ago(ms[i].tick) .. "[/color] " .. ms[i].text
+  end
+  return table.concat(out, "\n")
+end
+
+local function refresh_autopilot_row(player, c, st)
+  local f = c.claude_ap_frame
+  if not f then return end
+  local row = f.claude_ap_row
+  row.claude_ap_toggle.state = autopilot.is_on()
+  row.claude_ap_toggle.enabled = access.is_host(player)
+  row.claude_ap_stop.enabled = access.is_host(player) and autopilot.is_on()
+  f.claude_ap_info.caption = autopilot_info(st)
+  f.claude_ap_log_text.visible = st.ap_log == true
+  row.claude_ap_log.caption = st.ap_log and "Hide log" or "Show log"
+  if st.ap_log then f.claude_ap_log_text.caption = autopilot_log_text() end
+end
+
 function build_tab.helper(player, c, st)
+  build_autopilot_row(player, c)
   wrap_label(c, "claude_helper_status", "", "bold_label")
   local msg = wrap_label(c, "claude_helper_msg", st.msg or "")
   msg.style.font_color = {0.75, 0.75, 0.75}
@@ -161,6 +225,8 @@ function build_tab.helper(player, c, st)
 end
 
 function refresh_tab.helper(player, c, st)
+  local okr, errr = pcall(refresh_autopilot_row, player, c, st)
+  if not okr then log("claude-bridge gui autopilot row: " .. tostring(errr)) end
   local _, desc = try(agent.describe)
   c.claude_helper_status.caption = desc or "Helper status unavailable."
   c.claude_helper_msg.caption = st.msg or ""
@@ -397,6 +463,7 @@ local function plan_card(sp, p)
   local f = sp.add{type = "frame", style = "bordered_frame", direction = "vertical"}
   f.style.horizontally_stretchable = true
   local tags = {}
+  if p.owner == "autopilot" then tags[#tags + 1] = "[color=0.4,0.8,1]Autopilot[/color]" end
   if p.variant and p.variant ~= "" then tags[#tags + 1] = "variant " .. p.variant end
   if p.stage and p.stage ~= "" then tags[#tags + 1] = p.stage end
   local head = "[font=default-bold]" .. tostring(p.title) .. "[/font]"
@@ -441,6 +508,15 @@ local function plan_card(sp, p)
     lines[#lines + 1] = "[color=1,0.65,0.2]" .. w .. "[/color]"
   end
   local sup = p.status == "proposed" and p.superseded and plans.get(p.superseded)
+  local apq = storage.autopilot and storage.autopilot.on and storage.autopilot.approve_queue and
+    storage.autopilot.approve_queue[p.id]
+  if apq and p.status == "proposed" then
+    local left = math.max(0, math.ceil((apq.due - game.tick) / 60))
+    lines[#lines + 1] = "[color=0.4,0.8,1]The autopilot builds this in " .. left .. " s" ..
+      ((apq.deferred or 0) > 0 and " (waiting for you to leave its ground)" or "") .. ". Reject stops it.[/color]"
+  elseif p.owner == "autopilot" and p.autopilot_blocked and p.status == "proposed" then
+    lines[#lines + 1] = "[color=1,0.65,0.2]Not built by the autopilot: " .. tostring(p.autopilot_blocked) .. "[/color]"
+  end
   if p.future and p.status == "proposed" and not p.superseded then   -- planner v3: a roadmap stage offered now
     lines[#lines + 1] = "[color=0.4,0.9,0.4]Ready now: its research is done and the stage before it is built.[/color]"
   end
@@ -636,6 +712,7 @@ local function ensure_button(player)
   local flow = mod_gui.get_button_flow(player)
   if flow.claude_toggle then flow.claude_toggle.destroy() end
   if flow.claude_coords then flow.claude_coords.destroy() end
+  if flow.claude_ap_status then flow.claude_ap_status.destroy() end
   flow.add{type = "sprite-button", name = "claude_toggle", sprite = "entity/character", style = mod_gui.button_style,
     tooltip = "Claude helper panel (Ctrl+Shift+C)"}
   local b = flow.add{type = "button", name = "claude_coords", caption = "", style = mod_gui.button_style,
@@ -643,6 +720,22 @@ local function ensure_button(player)
       .. "y grows DOWN (south). Click to post a map pin of where you are."}
   b.style.minimal_width = 96
   b.style.horizontally_squashable = false
+  local ap = flow.add{type = "button", name = "claude_ap_status", caption = "", style = mod_gui.button_style,
+    tooltip = "Claude autopilot: current goal > next step | Claude calls this hour / cap | helper hand-craft share. " ..
+      "Click to open the Claude panel."}
+  ap.visible = false
+  ap.style.horizontally_squashable = false
+end
+
+-- the autopilot status line (everyone sees it while the autopilot is on; per-user setting hides it)
+local function update_autopilot_status(player)
+  local flow = mod_gui.get_button_flow(player)
+  local b = flow.claude_ap_status
+  if not b then return end
+  local ps = player.mod_settings["claude-show-autopilot-status"]
+  local line = autopilot.status_line()
+  b.visible = line ~= nil and (not ps or ps.value)
+  if b.visible then b.caption = line end
 end
 
 local function coords_text(player)
@@ -909,6 +1002,21 @@ local function on_click(e)
   local player = game.get_player(e.player_index)
   if not player then return end
   if name == "claude_toggle" or name == "claude_close" then return gui.toggle(player) end
+  if name == "claude_ap_status" then
+    if not panel(player) then open(player) end
+    return
+  end
+  if name == "claude_ap_log" then
+    local st = pstate(player)
+    st.ap_log = not st.ap_log
+    return gui.refresh(player, "helper")
+  end
+  if name == "claude_ap_stop" then
+    local ok, msg = autopilot.set(false, player)
+    if not ok then player.print(msg) end
+    pstate(player).msg = msg
+    return gui.refresh(player, "helper")
+  end
   if name == "claude_coords" then
     player.print("You are here: [gps=" .. math.floor(player.position.x) .. "," .. math.floor(player.position.y) ..
       "," .. player.surface.name .. "]")
@@ -947,6 +1055,22 @@ local function on_click(e)
   if name == "claude_confirm_run" then return answer_confirm(player, el, true) end
   if name == "claude_confirm_cancel" then return answer_confirm(player, el, false) end
   if el.tags and el.tags.plan_action then return plan_click(player, el) end
+end
+
+-- "Let Claude play": only the host; anyone else's click is undone
+local function on_checked(e)
+  local el = e.element
+  if not (el and el.valid and el.name == "claude_ap_toggle") then return end
+  local player = game.get_player(e.player_index)
+  if not player then return end
+  local ok, msg = autopilot.set(el.state, player)
+  local st = pstate(player)
+  st.msg = msg
+  if not ok then
+    el.state = autopilot.is_on()
+    access.deny(player, msg)
+  end
+  gui.refresh(player, "helper")
 end
 
 local function on_selection(e)
@@ -992,6 +1116,7 @@ end
 
 events.on(defines.events.on_gui_click, safe(on_click))
 events.on(defines.events.on_gui_selection_state_changed, safe(on_selection))
+events.on(defines.events.on_gui_checked_state_changed, safe(on_checked))
 events.on(defines.events.on_gui_confirmed, safe(on_confirmed))
 events.on(defines.events.on_gui_selected_tab_changed, safe(on_tab_changed))
 events.on(defines.events.on_gui_location_changed, function(e)
@@ -1012,8 +1137,9 @@ events.on(defines.events.on_player_joined_game, function(e)
   local player = game.get_player(e.player_index)
   if not player then return end
   local flow = mod_gui.get_button_flow(player)
-  if not (flow.claude_toggle and flow.claude_coords) then ensure_button(player) end
+  if not (flow.claude_toggle and flow.claude_coords and flow.claude_ap_status) then ensure_button(player) end
   update_coords(player)
+  pcall(update_autopilot_status, player)
   local st = pstate(player)
   if st.reopen then
     st.reopen = nil
@@ -1051,8 +1177,18 @@ events.on_nth_tick(30, function()
   for _, player in pairs(game.connected_players) do
     local ok, err = pcall(update_coords, player)
     if not ok then log("claude-bridge coords: " .. tostring(err)) end
+    local ok2, err2 = pcall(update_autopilot_status, player)
+    if not ok2 then log("claude-bridge autopilot status: " .. tostring(err2)) end
   end
 end)
+
+autopilot.on_change = function()
+  for _, player in pairs(game.connected_players) do
+    pcall(update_autopilot_status, player)
+    local st = storage.gui and storage.gui[player.index]
+    if st and st.open and panel(player) then gui.refresh(player, "helper") end
+  end
+end
 
 -- helper status etc.: only while open, only the visible tab
 events.on_nth_tick(60, function()
@@ -1123,6 +1259,10 @@ api.register_debug("gui_click", function(args)
   elseif el.type == "tabbed-pane" then
     el.selected_tab_index = v
     on_tab_changed(e)
+  elseif el.type == "checkbox" then
+    if not el.enabled then return {type = etype, panel_open = panel(player) ~= nil, disabled = true} end
+    if v == nil then el.state = not el.state else el.state = v and true or false end
+    on_checked(e)
   elseif el.type == "tab" then
     local tp = el.parent
     for i, t in ipairs(tp.tabs) do
@@ -1159,6 +1299,7 @@ api.register_debug("gui_dump", function(args)
   local flow = mod_gui.get_button_flow(player)
   local p = panel(player)
   return {button = flow.claude_toggle and dump(flow.claude_toggle) or nil, panel = p and dump(p) or nil,
+    autopilot_status = flow.claude_ap_status and dump(flow.claude_ap_status) or nil,
     location = p and p.location or nil, state = storage.gui and storage.gui[player.index]}
 end)
 

@@ -23,6 +23,11 @@ local function alog(a, msg)
   a.log_n = (a.log_n or 0) + 1  -- total ever logged (for "log lines since X")
   table.insert(a.log, {tick = game.tick, msg = msg})
   while #a.log > 25 do table.remove(a.log, 1) end
+  -- the helper's decisions that matter after the fact also go to the game log (diagnosing a stalled build)
+  if msg:find("^dismantle") or msg:find("^Built") or msg:find("^skipping") or msg:find("^not hand%-crafting") or
+      msg:find("^failed") then
+    log("claude-bridge helper: " .. msg)
+  end
 end
 
 -- Create the character near `near` (no items unless kit). Returns state or nil, err.
@@ -141,7 +146,105 @@ function agent.status()
   return {alive = true, pos = pos_out(c.position), surface = c.surface.name, health = c.health,
     inventory = inv_contents(c.get_main_inventory()),
     crafting = c.crafting_queue_size > 0 and c.crafting_queue or nil,
-    current = plain(a.cur), queue = q, halted = a.halted, log = a.log}
+    current = plain(a.cur), queue = q, halted = a.halted, log = a.log, counters = agent.counters()}
+end
+
+---------------------------------------------------------------------------
+-- hand-craft metrics (AUTOPILOT.md 7.2): crafting time, items by source, entities placed; 10-minute buckets
+---------------------------------------------------------------------------
+
+local BUCKET = 60 * 60 * 10        -- 10 game minutes
+local BUCKETS_KEPT = 36            -- 6 game hours
+-- made or gathered by the helper's own hands: crafted, hand-smelted, hand-mined (stone for furnaces, wood for poles)
+local HANDMADE = {craft = true, smelt = true, mine = true}
+
+local function stats_of(a)
+  local st = a.stats
+  if not st then st = {mined = {}, active_ticks = 0, mining_ticks = 0, walking_ticks = 0}; a.stats = st end
+  st.craft_ticks = st.craft_ticks or 0
+  st.crafted = st.crafted or {}
+  st.acquired = st.acquired or {}
+  st.short = st.short or {}
+  st.placed = st.placed or 0
+  st.b10 = st.b10 or {}
+  return st
+end
+
+local function bucket(st)
+  local k = math.floor(game.tick / BUCKET)
+  local b = st.b10[k]
+  if not b then
+    b = {craft_ticks = 0, acquired = {}, placed = 0}
+    st.b10[k] = b
+    for old in pairs(st.b10) do
+      if old < k - BUCKETS_KEPT then st.b10[old] = nil end
+    end
+  end
+  return b
+end
+
+local function count_acquired(a, src, n)
+  if not (src and n and n > 0) then return end
+  local st = stats_of(a)
+  -- fuel (coal fetched for burners and refuel rounds) is not a built item: kept apart from the hand-craft share
+  -- (round 3 judge: a refuel round's 371 hand-mined coal counted as "built by hand" with nothing placed)
+  local fsrc = src:match("^fuel_(.+)$")
+  if fsrc then
+    st.fuel = st.fuel or {}
+    st.fuel[fsrc] = (st.fuel[fsrc] or 0) + n
+    return
+  end
+  st.acquired[src] = (st.acquired[src] or 0) + n
+  local b = bucket(st)
+  b.acquired[src] = (b.acquired[src] or 0) + n
+end
+agent.count_acquired = count_acquired
+
+-- crafting seconds the helper spent in the last `window` ticks (10-minute bucket resolution)
+function agent.craft_seconds(window)
+  local a = get()
+  if not a then return 0 end
+  local st = stats_of(a)
+  local k0 = math.floor((game.tick - (window or BUCKET)) / BUCKET)
+  local t = 0
+  for k, b in pairs(st.b10) do if k >= k0 then t = t + b.craft_ticks end end
+  return t / 60
+end
+
+-- share of acquired (built) items that were hand-made (crafted or hand-smelted) over the last `window` ticks
+function agent.handcraft_share(window)
+  local a = get()
+  if not a then return nil end
+  local st = stats_of(a)
+  local k0 = math.floor((game.tick - (window or 60 * 60 * 60)) / BUCKET)
+  local hand, total = 0, 0
+  for k, b in pairs(st.b10) do
+    if k >= k0 then
+      for src, n in pairs(b.acquired) do
+        total = total + n
+        if HANDMADE[src] then hand = hand + n end
+      end
+    end
+  end
+  return {hand = hand, total = total, share = total > 0 and hand / total or 0}
+end
+
+function agent.counters()
+  local a = get()
+  if not a then return nil end
+  local st = stats_of(a)
+  local b = {}
+  local k1 = math.floor(game.tick / BUCKET)
+  for k = k1 - 17, k1 do
+    local x = st.b10[k]
+    if x then b[#b + 1] = {k = k, craft_s = math.floor(x.craft_ticks / 60), acquired = x.acquired, placed = x.placed} end
+  end
+  local share = agent.handcraft_share(60 * 60 * 60)
+  return {craft_s = math.floor(st.craft_ticks / 60), craft_s_10min = math.floor(agent.craft_seconds(BUCKET)),
+    crafted = st.crafted, acquired = st.acquired, placed = st.placed, short = st.short, fuel = st.fuel,
+    share_1h = share and math.floor(share.share * 1000 + 0.5) / 1000 or 0, buckets = b,
+    mined = st.mined, active_s = math.floor((st.active_ticks or 0) / 60),
+    walking_s = math.floor((st.walking_ticks or 0) / 60), mining_s = math.floor((st.mining_ticks or 0) / 60)}
 end
 
 ---------------------------------------------------------------------------
@@ -496,7 +599,13 @@ function tasks.craft(a, t)
     t.started = n
     return "running"
   end
-  if c.crafting_queue_size == 0 then return "done" end
+  if c.crafting_queue_size == 0 then
+    if t.acq_item then
+      local st = stats_of(a)
+      st.crafted[t.acq_item] = (st.crafted[t.acq_item] or 0) + (t.acq_n or 0)
+    end
+    return "done"
+  end
   return "running"
 end
 
@@ -575,6 +684,10 @@ function tasks.place(a, t)
     c.remove_item{name = item, count = 1}
   end
   if t.recipe then pcall(function() built.set_recipe(t.recipe) end) end
+  local st = stats_of(a)
+  st.placed = st.placed + 1
+  local bk = bucket(st)
+  bk.placed = bk.placed + 1
   -- start fuel (planner v2 plans: a few coal into each new burner when the helper carries some, so the first
   -- machines run while it builds the rest; the plan's round tops them up afterwards)
   -- (coal only: a slot holding wood would refuse the round's coal until the wood has burnt)
@@ -691,6 +804,23 @@ local function plan_reserved(p)
 end
 
 -- a tile any plan (proposed, waiting or applied) puts an entity on, with a 1-tile margin
+-- while the autopilot plays: a spot near a connected player or near what a player built, mined or rotated in the last
+-- 15 minutes (its keep-out, AUTOPILOT.md 5.3); the helper puts no furnace or chest of its own there
+local function in_keepout(p)
+  local s = storage.autopilot
+  if not (s and s.on) then return false end
+  local rs = settings.global["claude-autopilot-keepout"]
+  local r = rs and tonumber(rs.value) or 16
+  for _, pl in pairs(game.connected_players) do
+    if pl.character and math.abs(pl.position.x - p.x) < r and math.abs(pl.position.y - p.y) < r then return true end
+  end
+  for _, k in ipairs(s.keepout or {}) do
+    if game.tick - k.tick <= 60 * 60 * 15 and math.abs(k.x - p.x) < r and math.abs(k.y - p.y) < r then return true end
+  end
+  return false
+end
+agent.in_keepout = in_keepout
+
 local function plan_tile(x, y)
   for _, pl in pairs(storage.plans or {}) do
     local bb = pl.bbox
@@ -746,7 +876,7 @@ local function stash_plan(a, need)
               build_check_type = defines.build_check_type.manual}
             and s.count_entities_filtered{area = {{p.x - 1.5, p.y - 1.5}, {p.x + 1.5, p.y + 1.5}},
               type = {"entity-ghost", "resource", "character"}, limit = 1} == 0
-            and not plan_reserved(p) and not plan_tile(p.x, p.y) then
+            and not plan_reserved(p) and not plan_tile(p.x, p.y) and not in_keepout(p) then
           spot = p
           break
         end
@@ -812,6 +942,7 @@ local function free_furnace_spot(c, center, reserved)
         -- nor on anything a plan (also a later, waiting stage) will build there: the helper's own furnace once stood
         -- on the next stage's coal belt and that stage could not be placed
         if ok and plan_tile(p.x, p.y) then ok = false end
+        if ok and in_keepout(p) then ok = false end
         if ok and s.can_place_entity{name = SMELTER, position = p, force = c.force,
             build_check_type = defines.build_check_type.manual}
             and s.count_entities_filtered{area = {{p.x - 2, p.y - 2}, {p.x + 2, p.y + 2}}, type = "character",
@@ -826,40 +957,183 @@ end
 
 -- order planned tasks run in: 1 smelter setup (its ore/fuel/furnace), 2 load the smelter, 3 other
 -- fetching/mining (while it smelts), 4 collect the plates, 5 crafting
-local PHASE = {take = 3, take_player = 3, mine = 3, craft = 5, place = 1}
+local PHASE = {take = 3, take_player = 3, wait_collect = 3, mine = 3, craft = 5, place = 1}
 local FIRST_LOAD = 8  -- ore mined before a new smelter is started
 
--- Plans how to get `item` x n into the helper: its own stock, chests/furnace output, the player's
--- inventory, hand-crafting (recursively), smelting (in a nearby burner furnace or one it builds), or
--- mining raw stone/coal/ore/wood. Records an undo log so a failed branch leaves nothing half-planned.
+-- Where materials come from, first to last (AUTOPILOT.md 7.1; the same list as conventions.acquisition_order in
+-- factorio_claude/knowledge/doctrine.json, checked by tests/test_acquire_order.py):
+local ACQ_ORDER = {"inventory", "mall", "producer", "chest", "player", "wait", "short_craft", "handcraft", "smelt_mine"}
+-- hand-craft caps once a mall exists (doctrine conventions.handcraft): crafting seconds per job, per 10 game minutes,
+-- and a short craft that is always fine
+local HANDCRAFT = {max_job_s = 60, loop_alarm_s_per_10min = 120, short_craft_s = 10}
+-- bootstrap items: hand-crafting them is always allowed (Automation's red packs, the first assemblers and labs, poles)
+-- (an item a mall machine makes is never a bootstrap item once that machine exists: the mall's assemblers make the
+-- assemblers after it)
+local BOOTSTRAP_ITEMS = {["automation-science-pack"] = true, lab = true, ["assembling-machine-1"] = true,
+  ["small-electric-pole"] = true}
+local MALL_ACTIVE_TICKS = 60 * 180    -- a mall machine that finished a craft this recently counts as making its item
+local WAIT_COLLECT_TICKS = 60 * 120   -- one visit at a mall machine / filling chest waits at most 120 game seconds
+agent.ACQ_ORDER, agent.HANDCRAFT = ACQ_ORDER, HANDCRAFT
+local SRC_RANK = {mall = 1, plan = 2, producer = 3, chest = 4}
+
+local function mall_sets()
+  local s = storage.autopilot
+  return (s and s.mall_chests) or {}, (s and s.mall_machines) or {}
+end
+
+-- a mall exists once one of its machines works or one of its chests holds something (until then every hand-craft
+-- is bootstrap; round 2 real-copy run: the first mall chest built put the whole mall build itself under the budget)
+local function mall_exists()
+  local chests, machines = mall_sets()
+  for _, at in pairs(chests) do
+    local surface = type(at) == "table" and game.get_surface(at[3] or "nauvis")
+    local e = surface and surface.find_entities_filtered{position = {at[1], at[2]}, radius = 0.6, limit = 1,
+      type = {"container", "logistic-container"}}[1]
+    local inv = e and e.get_inventory(defines.inventory.chest)
+    if inv and not inv.is_empty() then return true end
+  end
+  for _, at in pairs(machines) do
+    local surface = type(at) == "table" and game.get_surface(at[3] or "nauvis")
+    local e = surface and surface.find_entities_filtered{position = {at[1], at[2]}, radius = 0.6, limit = 1,
+      type = "assembling-machine"}[1]
+    if e and e.status == defines.entity_status.working then return true end
+  end
+  return false
+end
+agent.mall_exists = mall_exists
+
+-- is a mall machine making its item? Its status alone is not enough: a machine fed by one inserter waits for
+-- ingredients most of the time between crafts (status item_ingredient_shortage) and still makes ~50 belts a minute
+-- (round 3: the helper took that for "not working" and hand-crafted 1676 belts next to a running belt machine).
+-- Active = crafting now, or it finished a craft within MALL_ACTIVE_TICKS (products_finished went up).
+local function mall_machine_active(e)
+  if not (e and e.valid and e.get_recipe()) then return false end
+  local s = storage.autopilot
+  if not s then return e.status == defines.entity_status.working end
+  s.mall_pf = s.mall_pf or {}
+  local u = e.unit_number
+  local pf = e.products_finished or 0
+  local r = s.mall_pf[u]
+  if not r or pf > r.pf then
+    s.mall_pf[u] = {pf = pf, t = (r and pf > r.pf) and game.tick or (pf > 0 and game.tick or -MALL_ACTIVE_TICKS)}
+    r = s.mall_pf[u]
+  end
+  if e.status == defines.entity_status.working or e.is_crafting() then return true end
+  return game.tick - r.t < MALL_ACTIVE_TICKS
+end
+agent.mall_machine_active = mall_machine_active
+
+-- the player's inventory as a source: the helper setting, and while the autopilot is on also its own setting
+local function player_items_ok()
+  local g = settings.global["claude-helper-use-player-items"]
+  if not (g and g.value) then return false end
+  local s = storage.autopilot
+  if s and s.on then
+    local ap = settings.global["claude-autopilot-use-player-items"]
+    return ap ~= nil and ap.value == true
+  end
+  return true
+end
+agent.player_items_ok = player_items_ok
+
+-- what a machine or chest is as a source (nil: not one): the mall, a plan's chest, a producer's surplus, a chest
+local function source_kind(e, mall_c, mall_m)
+  local u = e.unit_number
+  if u and (mall_c[u] or mall_m[u]) then return "mall" end
+  if e.type == "furnace" then return "producer" end
+  if e.type == "assembling-machine" then
+    -- only surplus: a machine whose output is full (nothing takes it), never one feeding a running line (ACQ-2)
+    if e.status == defines.entity_status.full_output then return "producer" end
+    return nil
+  end
+  return "chest"
+end
+
+-- Plans how to get `item` x n into the helper, in ACQ_ORDER: its own stock; the mall and the plan's chests; the
+-- surplus output of producers (furnaces, assemblers with a full output); other chests; the player's inventory (when
+-- allowed); waiting at a working mall machine; hand-crafting (recursively; once a mall exists only short or bounded
+-- jobs, see craft_ok); smelting (in a nearby burner furnace or one it builds); or mining raw stone/coal/ore/wood.
+-- Records an undo log so a failed branch leaves nothing half-planned.
 -- extra: {{x, y}, ...} chests that come first whatever their distance (a plan's coal chests for its fuel round).
-local function new_planner(c, center, player, extra)
-  local P = {tasks = {}, missing = {}, undo = {}, summary = {}, miss_n = 0, smelters = {}, spots = {}, used_f = {}}
+-- opts.allow_craft: a bootstrap job (Automation's red packs): crafting is always allowed.
+local function new_planner(c, center, player, extra, opts)
+  opts = opts or {}
+  local P = {tasks = {}, missing = {}, undo = {}, summary = {}, miss_n = 0, smelters = {}, spots = {}, used_f = {},
+    refused = {}, craft_s = 0, job_total = 0, allow_craft = opts.allow_craft, fuel = opts.fuel}
   local avail, srcs, first, seen = {}, {}, {}, {}
+  local mall_c, mall_m = mall_sets()
   for _, p in ipairs(extra or {}) do
     local e = c.surface.find_entities_filtered{position = {x = p[1], y = p[2]}, radius = 0.6, force = c.force,
       type = {"container", "logistic-container"}, limit = 1}[1]
     local inv = e and target_inventory(e, true)
     if inv and e.unit_number and not seen[e.unit_number] then
       seen[e.unit_number] = true
-      first[#first + 1] = {e = e, inv = inv, left = {}}
+      first[#first + 1] = {e = e, inv = inv, left = {}, kind = mall_c[e.unit_number] and "mall" or "plan"}
     end
   end
   for _, e in pairs(c.surface.find_entities_filtered{position = center, radius = SOURCE_RADIUS,
-      type = {"container", "logistic-container", "furnace"}, force = c.force}) do
-    local inv = target_inventory(e, true)
-    if inv and not inv.is_empty() and not (e.unit_number and seen[e.unit_number]) then
-      srcs[#srcs + 1] = {e = e, inv = inv, left = {}}
+      type = {"container", "logistic-container", "furnace", "assembling-machine"}, force = c.force}) do
+    local kind = not (e.unit_number and seen[e.unit_number]) and source_kind(e, mall_c, mall_m)
+    local inv = kind and target_inventory(e, true)
+    if inv and not inv.is_empty() then
+      srcs[#srcs + 1] = {e = e, inv = inv, left = {}, kind = kind}
     end
   end
-  table.sort(srcs, function(s1, s2) return dist(s1.e.position, c.position) < dist(s2.e.position, c.position) end)
-  if #first > 0 then
-    table.sort(first, function(s1, s2) return dist(s1.e.position, c.position) < dist(s2.e.position, c.position) end)
-    for _, s in ipairs(srcs) do first[#first + 1] = s end
-    srcs = first
+  for _, s in ipairs(first) do srcs[#srcs + 1] = s end
+  -- the mall's chests and plate depots are sources wherever they stand (a far build site still takes from the mall)
+  for u, at in pairs(mall_c) do
+    if type(at) == "table" and not seen[u] and c.surface.name == at[3] then
+      local e = c.surface.find_entities_filtered{position = {at[1], at[2]}, radius = 0.6, force = c.force,
+        type = {"container", "logistic-container"}, limit = 1}[1]
+      if e and e.unit_number == u and dist(e.position, center) > SOURCE_RADIUS then
+        local inv = target_inventory(e, true)
+        if inv and not inv.is_empty() then
+          seen[u] = true
+          srcs[#srcs + 1] = {e = e, inv = inv, left = {}, kind = "mall"}
+        end
+      end
+    end
   end
-  local pinv = player and player.connected and player.character and player.get_main_inventory()
+  -- mall first, then the plan's chests, producers' surplus, other chests; nearest first within each
+  table.sort(srcs, function(s1, s2)
+    if s1.kind ~= s2.kind then return SRC_RANK[s1.kind] < SRC_RANK[s2.kind] end
+    return dist(s1.e.position, c.position) < dist(s2.e.position, c.position)
+  end)
+  local pinv = player and player_items_ok() and player.connected and player.character and player.get_main_inventory()
   local pleft = {}
+  -- mall machines by product (step "wait": the helper waits for them instead of crafting); mall_items: every item a
+  -- mall machine is set to make, active or not
+  local makers, mall_items = {}, {}
+  for u, at in pairs(mall_m) do
+    local e = type(at) == "table" and c.surface.name == at[3] and c.surface.find_entities_filtered{
+      position = {at[1], at[2]}, radius = 0.6, type = "assembling-machine", force = c.force, limit = 1}[1]
+    if e and e.unit_number ~= u then e = nil end
+    local r = e and e.valid and e.get_recipe()
+    if r then
+      for _, pr in pairs(r.products) do mall_items[pr.name] = true end
+    end
+    -- only a machine that makes its item (crafting now or a craft finished in the last 3 game minutes; round 2 run:
+    -- freshly built mall machines with no plates yet were taken for makers and the helper waited at them for ever
+    -- instead of building the belts that feed them)
+    if r and mall_machine_active(e) then
+      for _, pr in pairs(r.products) do makers[pr.name] = makers[pr.name] or e end
+    end
+  end
+  P.mall_items = mall_items
+
+  -- a top-level hand-craft job of `secs` crafting seconds is fine (AUTOPILOT.md 7.1 steps 7-8). Once a mall exists
+  -- EVERY craft counts against the 10-minute budget, short ones too (round 3: a refused batch was halved until it
+  -- fell under the 10 s "short craft" bar - 40 belts at a time, 145-375 crafting seconds per 10 game minutes next to
+  -- a running mall); an item a mall machine makes only gets a short top-up.
+  function P.craft_ok(item, secs)
+    if P.allow_craft then return true end
+    if BOOTSTRAP_ITEMS[item] and not mall_items[item] then return true end
+    if not mall_exists() then return true end                     -- bootstrap: no mall yet
+    local recent = agent.craft_seconds(60 * 60 * 10) + P.job_total
+    if recent + secs > HANDCRAFT.loop_alarm_s_per_10min then return false end
+    if mall_items[item] then return secs <= HANDCRAFT.short_craft_s end
+    return secs <= HANDCRAFT.max_job_s
+  end
 
   local function set(tbl, k, v)
     P.undo[#P.undo + 1] = {tbl, k, tbl[k]}
@@ -881,7 +1155,17 @@ local function new_planner(c, center, player, extra)
     if note then P.summary[#P.summary + 1] = note end
   end
 
+  -- top-level tasks carry what they deliver (acq = source, acq_n = items) for the hand-craft share (7.2)
+  local function tag(task, top, src, n)
+    if top then
+      task.acq, task.acq_item, task.acq_n = (P.fuel and ("fuel_" .. src) or src), task.item or task.acq_item, n
+    end
+    return task
+  end
+
   function P.acquire(item, n, depth)
+    depth = depth or 0
+    local top = depth == 0
     if avail[item] == nil then avail[item] = c.get_item_count(item) end
     local use = math.min(avail[item], n)
     if use > 0 then set(avail, item, avail[item] - use); n = n - use end
@@ -892,8 +1176,8 @@ local function new_planner(c, center, player, extra)
         local k = math.min(s.left[item], n)
         if k > 0 then
           set(s.left, item, s.left[item] - k)
-          add({type = "take", x = s.e.position.x, y = s.e.position.y, name = s.e.name, item = item, count = k},
-            k .. " " .. item .. " from " .. s.e.name)
+          add(tag({type = "take", x = s.e.position.x, y = s.e.position.y, name = s.e.name, item = item, count = k},
+            top, s.kind, k), k .. " " .. item .. " from " .. (s.kind == "mall" and "the mall " or "") .. s.e.name)
           n = n - k
           if n <= 0 then return true end
         end
@@ -904,23 +1188,43 @@ local function new_planner(c, center, player, extra)
       local k = math.min(pleft[item], n)
       if k > 0 then
         set(pleft, item, pleft[item] - k)
-        add({type = "take_player", player = player.index, item = item, count = k}, k .. " " .. item .. " from you")
+        add(tag({type = "take_player", player = player.index, item = item, count = k}, top, "player", k),
+          k .. " " .. item .. " from you")
         n = n - k
         if n <= 0 then return true end
       end
     end
+    -- a working mall machine makes it: wait there and collect instead of crafting
+    local mk = makers[item]
+    if mk and mk.valid and not P.allow_craft then
+      add(tag({type = "wait_collect", x = mk.position.x, y = mk.position.y, name = mk.name, item = item, count = n,
+        max_wait = WAIT_COLLECT_TICKS}, top, "wait", n), "wait for " .. n .. " " .. item .. " at the mall")
+      return true
+    end
     local r = c.force.recipes[item]
-    if (depth or 0) < 5 and handcraftable(r) then
+    if depth < 5 and handcraftable(r) then
       local per = product_amount(r, item)
       if per > 0 then
         local crafts = math.ceil(n / per)
         local m, miss_before = mark(), P.miss_n
+        local s0 = P.craft_s
         local ok = true
         for _, ing in pairs(r.ingredients) do
-          if ing.type ~= "item" or not P.acquire(ing.name, ing.amount * crafts, (depth or 0) + 1) then ok = false; break end
+          if ing.type ~= "item" or not P.acquire(ing.name, ing.amount * crafts, depth + 1) then ok = false; break end
         end
         if ok then
-          add({type = "craft", recipe = r.name, count = crafts}, "craft " .. crafts * per .. " " .. item)
+          set(P, "craft_s", P.craft_s + crafts * (r.energy or 0.5))
+          if top and not P.craft_ok(item, P.craft_s - s0) then
+            -- too much hand-crafting for one job (a mall exists): build what is there, report the shortage
+            rollback(m)
+            P.refused[item] = true
+            P.missing[item] = (P.missing[item] or 0) + n
+            P.miss_n = P.miss_n + 1
+            return false
+          end
+          if top then set(P, "job_total", P.job_total + P.craft_s - s0) end
+          add(tag({type = "craft", recipe = r.name, count = crafts, acq_item = item}, top, "craft", crafts * per),
+            "craft " .. crafts * per .. " " .. item)
           set(avail, item, avail[item] + crafts * per - n)
           return true
         end
@@ -935,8 +1239,10 @@ local function new_planner(c, center, player, extra)
       local per = product_amount(sr, item)
       local runs = math.ceil(n / per)
       local m, miss_before = mark(), P.miss_n
-      if P.smelt(sr, item, runs, (depth or 0) + 1) then
+      if P.smelt(sr, item, runs, depth + 1) then
         set(avail, item, avail[item] + runs * per - n)
+        local S = P.smelters[sr.ingredients[1].name]
+        if top and S and S.run then S.run.acq = "smelt" end
         return true
       end
       rollback(m)
@@ -944,13 +1250,14 @@ local function new_planner(c, center, player, extra)
     end
     if item == "wood" then
       local trees = math.ceil(n / WOOD_PER_TREE)
-      add({type = "mine", entity_type = "tree", count = trees, near = center, search_radius = 150},
-        "chop " .. trees .. " trees")
+      add(tag({type = "mine", entity_type = "tree", count = trees, near = center, search_radius = 150}, top, "mine",
+        trees * WOOD_PER_TREE), "chop " .. trees .. " trees")
       set(avail, item, avail[item] + trees * WOOD_PER_TREE - n)
       return true
     end
     if MINEABLE[item] and not P.no_mine and P.resource_near(item) then
-      add({type = "mine", name = item, count = n, near = center, search_radius = MINE_RADIUS}, "mine " .. n .. " " .. item)
+      add(tag({type = "mine", name = item, count = n, near = center, search_radius = MINE_RADIUS}, top, "mine", n),
+        "mine " .. n .. " " .. item)
       return true
     end
     P.missing[item] = (P.missing[item] or 0) + n
@@ -1210,7 +1517,16 @@ function tasks.build_ghosts(a, t)
   local ghosts = {}
   for _, g in pairs(c.surface.find_entities_filtered{position = center, radius = radius, type = "entity-ghost", force = c.force}) do
     if g.quality.name == "normal" and place_item(g.ghost_name) and ghost_of_plan(g, t.plan) then
-      ghosts[#ghosts + 1] = g
+      -- a ghost over something marked for deconstruction (an in-place swap: the electric drill over its burner
+      -- drill) can only be built once that is gone: it waits for the dismantling instead of counting as blocked
+      -- (round 2 run: such ghosts made the build give up with 100 free ghosts of the stage still unbuilt)
+      local b = g.bounding_box
+      local waits = false
+      for _, f in pairs(c.surface.find_entities_filtered{area = {{b.left_top.x + 0.1, b.left_top.y + 0.1},
+          {b.right_bottom.x - 0.1, b.right_bottom.y - 0.1}}, force = c.force}) do
+        if f.type ~= "entity-ghost" and f.to_be_deconstructed() then waits = true; break end
+      end
+      if not waits then ghosts[#ghosts + 1] = g end
     end
   end
   -- order = {{x0, y0, x1, y1}, ...}: an approved plan's sites in its build order; this round only handles the first
@@ -1330,7 +1646,7 @@ function tasks.build_ghosts(a, t)
         if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
           pl = nil
         end
-        local P = new_planner(c, center, pl, t.coal_from)
+        local P = new_planner(c, center, pl, t.coal_from, {fuel = true})
         if P.acquire("coal", short, 0) and #P.tasks > 0 then
           local plan = P.ordered()
           alog(a, "start fuel: " .. table.concat(P.summary, ", "))
@@ -1364,7 +1680,10 @@ function tasks.build_ghosts(a, t)
       return "done"
     end
   end
-  local P = new_planner(c, center, player, t.take_from)  -- a later stage: the previous stage's chests first
+  -- a later stage: the previous stage's chests first. Building the mall itself is bootstrap (round 3 smoke run: a
+  -- half-built mall put its own build under the hand-craft budget and the helper waited at its first machines)
+  local tp = t.plan and storage.plans and storage.plans[t.plan]
+  local P = new_planner(c, center, player, t.take_from, {allow_craft = tp and tp.mall_build or nil})
   local items = {}
   for item in pairs(need) do items[#items + 1] = item end
   -- scarce materials: production first (drills/furnaces), then the rest; stop when the haul won't fit
@@ -1375,14 +1694,26 @@ function tasks.build_ghosts(a, t)
   local free, full = c.get_main_inventory().count_empty_stacks() - 2, false
   for _, item in ipairs(items) do
     local n = need[item]
+    local refused = false
     while n > 0 do
       local m = P.mark()
+      P.refused[item] = nil
       local ok = P.acquire(item, n, 0)
-      if not ok or P.slots() <= free or #P.tasks == m[1] then break end
+      if ok and (P.slots() <= free or #P.tasks == m[1]) then break end
+      if not ok and not P.refused[item] then break end     -- can't get it at all (listed in P.missing)
       P.rollback(m)
+      refused = refused or not ok                          -- too much hand-crafting: a smaller batch may be fine
       n = math.floor(n / 2)
     end
-    if n < need[item] then full = n == 0; break end  -- inventory is the limit; the next round takes the rest
+    if refused then
+      local st = stats_of(a)
+      st.short[item] = (st.short[item] or 0) + (need[item] - n)
+      if n > 0 then P.missing[item] = nil end
+      alog(a, "not hand-crafting " .. (need[item] - n) .. " " .. item .. " (hand-craft budget; waiting for automation)")
+    elseif n < need[item] then
+      full = n == 0
+      break   -- inventory is the limit; the next round takes the rest
+    end
   end
 
   if #P.tasks == 0 and full and (t.stashes or 0) < 3 then
@@ -1634,7 +1965,7 @@ local function refuel_fetch(a, t, need, mine, note)
   if not (settings.global["claude-helper-use-player-items"] and settings.global["claude-helper-use-player-items"].value) then
     player = nil
   end
-  local P = new_planner(c, c.position, player, t.coal_from)
+  local P = new_planner(c, c.position, player, t.coal_from, {fuel = true})
   P.no_mine = not mine or nil
   if not P.acquire("coal", math.max(1, math.min(math.ceil(need), MAX_FETCH_FUEL)), 0) or #P.tasks == 0 then
     return false
@@ -1848,6 +2179,62 @@ function tasks.give_all(a, t)
   return "done"
 end
 
+-- {type="acquire", item, count, bootstrap?, x?, y?}: get `count` of `item` into the helper's inventory with the material
+-- planner (ACQ_ORDER), then continue. bootstrap = a hand-craft the doctrine always allows (Automation's 10 red packs).
+function tasks.acquire(a, t)
+  local c = a.entity
+  local have = c.get_item_count(t.item)
+  if have >= (t.count or 1) then return "done" end
+  if t.planned then
+    if have > 0 then return "done" end
+    return nil, "couldn't get " .. t.item
+  end
+  local player = t.player and game.get_player(t.player) or nil
+  local P = new_planner(c, t.x and {x = t.x, y = t.y} or c.position, player, t.take_from,
+    {allow_craft = t.bootstrap})
+  if not P.acquire(t.item, (t.count or 1) - have, 0) then
+    return nil, "can't get " .. t.item .. (next(P.missing) and (" (" .. missing_text(P.missing) .. ")") or "")
+  end
+  local plan = P.ordered()
+  alog(a, "getting " .. t.item .. ": " .. table.concat(P.summary, ", "))
+  t.planned = true
+  table.insert(a.queue, 1, t)
+  for i = #plan, 1, -1 do table.insert(a.queue, 1, plan[i]) end
+  t.requeued = true
+  return "done"
+end
+
+-- {type="wait_collect", x, y, name, item, count, max_wait}: walk to a mall machine (or a filling chest) and take
+-- `item` from its output as it is made, waiting there at most max_wait ticks per visit (the helper does this
+-- instead of hand-crafting once a mall makes the item)
+function tasks.wait_collect(a, t)
+  local c = a.entity
+  local e = entity_at(c.surface, {x = t.x, y = t.y, name = t.name})
+  if not e then return nil, "nothing at " .. t.x .. "," .. t.y end
+  local near = ensure_near(a, t, e.position, c.reach_distance)
+  if near == nil then return nil, "can't reach the " .. t.name end
+  if not near then return "running" end
+  c.walking_state = {walking = false}
+  t.since = t.since or game.tick
+  t.taken = t.taken or 0
+  local inv = target_inventory(e, true)
+  local k = inv and math.min(inv.get_item_count(t.item), (t.count or 1) - t.taken) or 0
+  if k > 0 then
+    local got = c.insert{name = t.item, count = k}
+    if got > 0 then inv.remove{name = t.item, count = got}; t.taken = t.taken + got end
+  end
+  if t.taken >= (t.count or 1) then
+    alog(a, "collected " .. t.taken .. " " .. t.item .. " at the mall")
+    return "done"
+  end
+  if game.tick - t.since > (t.max_wait or 7200) then
+    alog(a, "waited for " .. t.item .. " at the mall; took " .. t.taken)
+    if t.taken > 0 then t.acq_n = t.taken; return "done" end
+    return nil, "the mall made no " .. t.item
+  end
+  return "running"
+end
+
 -- {type="dismantle", plan}: pick up exactly the entities an approved plan listed for removal (planner v2 rebuild):
 -- nearest first, only while they are still valid and marked for deconstruction. Items (and their contents) go into
 -- the helper's inventory; when it is full the rest spills next to it (reported). Ghosts that waited for the ground
@@ -1856,10 +2243,45 @@ function tasks.dismantle(a, t)
   local c = a.entity
   local p = storage.plans and storage.plans[t.plan]
   if not (p and p.removing) then return "done" end
+  -- an in-place swap stage: nothing is taken apart while the stage's other ghosts (its new boilers, engines and
+  -- poles) still stand unbuilt (round 2 run: S4's burner drills went before its two new steam units, and the 30
+  -- electric drills that replaced them ran on one boiler)
+  -- (it waits as long as each build round still places something; two rounds in a row without progress and it goes on)
+  if not t.started and (t.waits or 0) < 2 and p.bbox then
+    local bb = p.bbox
+    local left = 0
+    for _, g in pairs(c.surface.find_entities_filtered{area = {{bb[1] - 1, bb[2] - 1}, {bb[3] + 1, bb[4] + 1}},
+        type = "entity-ghost", force = c.force}) do
+      if ghost_of_plan(g, t.plan) then
+        -- a ghost standing over what this stage takes apart (the electric drill over its burner drill) is the swap
+        -- itself: only the others count
+        local b = g.bounding_box
+        local over = false
+        for _, f in pairs(c.surface.find_entities_filtered{area = {{b.left_top.x + 0.1, b.left_top.y + 0.1},
+            {b.right_bottom.x - 0.1, b.right_bottom.y - 0.1}}, force = c.force}) do
+          if f.type ~= "entity-ghost" and f.to_be_deconstructed() then over = true; break end
+        end
+        if not over then left = left + 1 end
+      end
+    end
+    if left > 0 then
+      if t.last_left and left < t.last_left then t.waits = 0 end     -- progress: keep waiting
+      t.last_left = left
+      t.waits = (t.waits or 0) + 1
+      alog(a, "dismantle waits: " .. left .. " ghosts of the stage come first")
+      table.insert(a.queue, 1, t)
+      table.insert(a.queue, 1, {type = "build_ghosts", x = (bb[1] + bb[3]) / 2, y = (bb[2] + bb[4]) / 2,
+        radius = math.ceil(math.sqrt((bb[3] - bb[1]) ^ 2 + (bb[4] - bb[2]) ^ 2) / 2) + 4, plan = t.plan, fuel = true,
+        order = p.build_order, take_from = p.take_from, coal_from = p.coal_from, soft = true})
+      t.requeued = true
+      return "done"
+    end
+  end
+  t.started = true
   local best, bd, bu
   for unit, row in pairs(p.removing) do
     local e = row.entity
-    if e and e.valid and e.to_be_deconstructed() and not row.skip then
+    if e and e.valid and (e.to_be_deconstructed() or p.lazy_removal) and not row.skip then
       local d = dist(e.position, c.position)
       if not bd or d < bd then best, bd, bu = e, d, unit end
     elseif not (e and e.valid) and api.plans_removed then
@@ -1886,7 +2308,30 @@ function tasks.dismantle(a, t)
   t.timer = nil
   local inv = c.get_main_inventory()
   local name = best.name
+  local gone_box = best.bounding_box
   local ok = best.valid and best.mine{inventory = inv, force = false}
+  local places = {}
+  if ok then
+    -- the swap's replacement right away when the helper carries it (a burner drill out, its electric drill in:
+    -- the field keeps mining instead of standing empty until every old machine is taken apart)
+    local b = gone_box
+    for _, g in pairs(c.surface.find_entities_filtered{area = {{b.left_top.x + 0.1, b.left_top.y + 0.1},
+        {b.right_bottom.x - 0.1, b.right_bottom.y - 0.1}}, type = "entity-ghost", force = c.force}) do
+      local item = place_item(g.ghost_name)
+      if item and ghost_of_plan(g, t.plan) and c.get_item_count(item) > 0 then
+        local still = false
+        local gb = g.bounding_box
+        for _, f in pairs(c.surface.find_entities_filtered{area = {{gb.left_top.x + 0.1, gb.left_top.y + 0.1},
+            {gb.right_bottom.x - 0.1, gb.right_bottom.y - 0.1}}, force = c.force}) do
+          if f.valid and f.type ~= "entity-ghost" and f.to_be_deconstructed() then still = true; break end
+        end
+        if not still then
+          places[#places + 1] = {type = "place", name = g.ghost_name, x = g.position.x, y = g.position.y,
+            direction = g.direction, soft = true, ghost_only = true, fuel = 5, autopilot = t.autopilot}
+        end
+      end
+    end
+  end
   if not ok and best.valid then
     ok = best.mine{inventory = inv, force = true}  -- inventory full: what doesn't fit spills next to the helper
     if ok and not t.spilled then t.spilled = true; alog(a, "dismantle: inventory full, items spilled") end
@@ -1894,6 +2339,35 @@ function tasks.dismantle(a, t)
   if not ok then return nil, "couldn't pick up " .. name end
   t.n = (t.n or 0) + 1
   if api.plans_removed then api.plans_removed(bu, "removed") end
+  if p.lazy_removal and api.plans_place_deferred then
+    -- the ghosts that waited for this ground appear now, and the replacement goes in right away when carried
+    pcall(api.plans_place_deferred, p)
+    local b = gone_box
+    for _, g in pairs(c.surface.find_entities_filtered{area = {{b.left_top.x + 0.1, b.left_top.y + 0.1},
+        {b.right_bottom.x - 0.1, b.right_bottom.y - 0.1}}, type = "entity-ghost", force = c.force}) do
+      local item = place_item(g.ghost_name)
+      local gb = g.bounding_box
+      local blocked = false
+      for _, f in pairs(c.surface.find_entities_filtered{area = {{gb.left_top.x + 0.1, gb.left_top.y + 0.1},
+          {gb.right_bottom.x - 0.1, gb.right_bottom.y - 0.1}}, force = c.force}) do
+        if f.valid and f.type ~= "entity-ghost" then blocked = true; break end
+      end
+      if item and not blocked and ghost_of_plan(g, t.plan) and c.get_item_count(item) > 0 then
+        local dup = false
+        for _, q in ipairs(places) do if q.x == g.position.x and q.y == g.position.y then dup = true end end
+        if not dup then
+          places[#places + 1] = {type = "place", name = g.ghost_name, x = g.position.x, y = g.position.y,
+            direction = g.direction, soft = true, ghost_only = true, fuel = 5, autopilot = t.autopilot}
+        end
+      end
+    end
+  end
+  if #places > 0 then        -- place the replacements, then go on taking apart
+    table.insert(a.queue, 1, t)
+    for i = #places, 1, -1 do table.insert(a.queue, 1, places[i]) end
+    t.requeued = true
+    return "done"
+  end
   return "running"
 end
 
@@ -1940,21 +2414,37 @@ local function tick()
     a.cur = table.remove(a.queue, 1)
   end
   local t = a.cur
-  -- helper work counters (planner v2 measures its gather rate from these): ticks busy / walking / mining
-  local stats = a.stats
-  if not stats then stats = {mined = {}, active_ticks = 0, mining_ticks = 0, walking_ticks = 0}; a.stats = stats end
+  -- helper work counters (planner v2 measures its gather rate from these): ticks busy / walking / mining / crafting
+  local stats = stats_of(a)
   stats.active_ticks = stats.active_ticks + 1
   if t.type == "walk" then stats.walking_ticks = stats.walking_ticks + 1
   elseif t.type == "mine" and t.timer then stats.mining_ticks = stats.mining_ticks + 1 end
+  if a.entity.crafting_queue_size > 0 then
+    stats.craft_ticks = stats.craft_ticks + 1
+    local b = bucket(stats)
+    b.craft_ticks = b.craft_ticks + 1
+  end
   local handler = tasks[t.type]
   local ok, res, err
+  local qlen = #a.queue
   if not handler then
     ok, res, err = true, nil, "unknown task type " .. tostring(t.type)
   else
     ok, res, err = pcall(handler, a, t)
     if not ok then err = res; res = nil end
   end
+  if t.autopilot then   -- what an autopilot task queues is autopilot work too (switching it off cancels all of it)
+    for i = 1, math.max(0, #a.queue - qlen) do
+      if a.queue[i] then a.queue[i].autopilot = true end
+    end
+    if a.cur and a.cur ~= t then a.cur.autopilot = true end
+  end
   if res == "running" then return end
+  if res == "done" and t.acq and not t.requeued then
+    local n = t.acq_n
+    if t.type == "smelt" then n = t.taken end
+    count_acquired(a, t.acq, n)
+  end
   if res == "done" then
     if a.cur == t then
       if not t.auto and not t.quiet and not t.requeued then
@@ -2022,7 +2512,7 @@ local needs_player = {give_all = true, take_hand = true}
 -- Helper builds everything in bbox {x0, y0, x1, y1} (spawning it if needed), then fills the hand-fed burners
 -- at positions `fuel_at` ({{x, y}, ...}: drills / inserters / boilers) with 50 coal. An endless follow (or an
 -- idle/halted queue) is replaced; other work stays first. what = "build" | "refuel". -> one-line message.
-function agent.work_area(player, bb, what, label, fuel_at, plan_id)
+function agent.work_area(player, bb, what, label, fuel_at, plan_id, opts)
   local cx, cy = (bb[1] + bb[3]) / 2, (bb[2] + bb[4]) / 2
   local radius = math.ceil(math.sqrt((bb[3] - bb[1]) ^ 2 + (bb[4] - bb[2]) ^ 2) / 2) + 4
   local pre = ""
@@ -2049,6 +2539,41 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id)
     pl.takes_done = true
   end
   if dismantle then
+    -- in-place swaps (burner drill -> electric drill, burner inserter -> inserter): get the replacements FIRST, while
+    -- the old machines still run (round-1 finding: taking the copper burner drills apart before the electric drills
+    -- were made stopped all copper, and the circuits for those drills then had to be hand-mined and hand-smelted)
+    local rm_boxes = {}
+    for _, rm in ipairs(pl.removes or {}) do
+      local proto = prototypes.entity[rm[1]]
+      if proto then
+        local w, h = proto.tile_width, proto.tile_height
+        rm_boxes[#rm_boxes + 1] = {rm[2] - w / 2, rm[3] - h / 2, rm[2] + w / 2, rm[3] + h / 2}
+      end
+    end
+    local need = {}
+    for _, e in ipairs(pl.entities or {}) do
+      local proto = prototypes.entity[e[1]]
+      if proto and #rm_boxes > 0 then
+        local w, h = proto.tile_width, proto.tile_height
+        if e[4] == defines.direction.east or e[4] == defines.direction.west then w, h = h, w end
+        local b = {e[2] - w / 2, e[3] - h / 2, e[2] + w / 2, e[3] + h / 2}
+        for _, r in ipairs(rm_boxes) do
+          if b[1] < r[3] - 0.05 and r[1] < b[3] - 0.05 and b[2] < r[4] - 0.05 and r[2] < b[4] - 0.05 then
+            local item, n = place_item(e[1])
+            if item then need[item] = (need[item] or 0) + n end
+            break
+          end
+        end
+      end
+    end
+    for item, n in pairs(need) do
+      list[#list + 1] = {type = "acquire", item = item, count = n, x = cx, y = cy, soft = true,
+        take_from = pl.take_from, player = pi}
+    end
+    -- and everything else of the stage first (its boilers, engines and poles: round 2 run, S4's electric drills
+    -- stood without power for 20 game minutes because the old burners went before the new steam units were built)
+    list[#list + 1] = {type = "build_ghosts", x = cx, y = cy, radius = radius, player = pi, plan = plan_id,
+      fuel = true, coal_from = coal_from, order = pl.build_order, take_from = pl.take_from}
     list[#list + 1] = {type = "dismantle", plan = plan_id}
   end
   -- S0 repairs: the listed existing burners get fuel before anything new is built
@@ -2084,6 +2609,9 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id)
     return pre .. "Nothing in this plan is fuelled by hand."
   end
   -- an endless follow or logistics round never finishes: drop it; a halted queue is stale: replace it
+  if opts and opts.autopilot then
+    for _, t in ipairs(list) do t.autopilot = true end
+  end
   local endless = {follow = true, round = true}
   local busy = a.cur and not endless[a.cur.type] and not (a.cur.quiet and a.cur.type == "refuel") and not a.halted
   local queue = {}

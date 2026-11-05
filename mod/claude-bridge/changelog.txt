@@ -1,4 +1,29 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.6.0
+Date: 2026-11-05
+  Features:
+    - "Let Claude play" (autopilot): the host switches it on in the Helper tab, with @claude autopilot on|off|status
+      or "let claude play". Claude then plays by itself: it restores power and fuel, keeps research queued, builds the
+      starter base stage by stage, and keeps growing it. A status line shows the goal and the next step.
+    - Growth past the starter base: a mall right after the electric drills (belts, inserters,
+      undergrounds, pipes, steam engines, electric drills, assemblers, fast and long-handed inserters and iron chests
+      made by assemblers, each into a limited chest; fed by its own taps on the starter base's plate lines); more
+      steam power in the reserved room; a straight plate bus with smelting cells at the ore, a steel column and a
+      second red + green science block on it (downstream of the mall, which keeps the first pick); then oil:
+      pumpjacks on the nearest crude oil, a refinery on basic oil processing and a chemical plant making plastic.
+    - The helper takes building materials from the mall first, waits at a mall machine that is making the item
+      rather than crafting, and once a mall exists hand-crafts at most 120 crafting seconds per 10 game minutes
+      (short crafts count too; an item the mall makes only gets a short top-up). The hand-craft share shows on the
+      status line; fuel fetched for burners is counted apart.
+    - Expansion feeds stay short and straight (at most 1.4x the straight distance + 12 tiles, 6 turns), so no new belt snakes
+      across the map. When everything it can build is built it says so once and idles instead of retrying.
+    - In-place swaps (burner drills -> electric drills) gather the replacements before taking anything apart, so
+      production never stops halfway through the swap.
+  Changes:
+    - Autopilot research skips weapons in a peaceful game and never queues a tech whose science packs the base does
+      not make.
+    - New map settings: allow removal, keep-out radius, grace period, player items, Claude calls per hour.
+---------------------------------------------------------------------------------------------------
 Version: 0.5.0
 Date: 2026-10-29
   Features:

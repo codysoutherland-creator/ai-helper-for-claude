@@ -57,7 +57,8 @@ COAL_MARGIN = 1.15
 INSERTER_AVG_KW = 5.0                       # average draw of an electric inserter (max 14.7 kW, mostly idle)
 DRILL_DUTY = 0.5                            # electric drills run this share of the time (live S5: 8 of 35 working)
 POWER_MARGIN = 1.1
-LONG_RUN = 120                              # a single belt run longer than this becomes a connector stage
+SUPPLY_EFF = 0.9                            # share of a supply-limited rate the plan promises (stage_rates)
+LONG_RUN = 120                             # a single belt run longer than this becomes a connector stage
 FAR_APART = 400                             # total starter belt beyond this: FAR_APART warning
 MIN_ORE_E = 10                              # ore tiles in an electric drill's 5x5 area for a slot to count
 COLUMN_INS_FILL = 10                        # coal per fill of a smelting column's burner inserter (S0/S1)
@@ -308,6 +309,8 @@ def check_monotone(mp: MasterPlan, gd) -> list:
             issues.append({"code": "STAGE_CONFLICT", "text": f"{e.name} at ({e.x}, {e.y}) is removed before it "
                                                              f"is built"})
     for z in mp.zones:
+        if z.kind == "bus":      # the autopilot's plate bus corridor: later blocks tap it from its tap rows
+            continue
         zx0, zy0, zx1, zy1 = z.rect
         ports = {tuple(p) for p in z.ports}
         for e in mp.ents:
@@ -464,7 +467,10 @@ def stage_rates(mp: MasterPlan, gd, k: int) -> dict:
     if reds:   # each pack: 1 copper + 1 gear (2 iron) from side A of the columns (half the plates)
         # round 3 live (real-save copy): with S0's 4 burner drills the iron side A makes ~30/min, so red runs at
         # 15-18/min until the electric drills of S4 (round 2 counted all the iron and promised 30)
-        cap = min(reds * 0.1 * 60, out.get("iron-plate", 0) / 4, out.get("copper-plate", 0) / 2)
+        # a rate limited by the plate SUPPLY (not by the machines) is promised at SUPPLY_EFF of it: belt and
+        # inserter gaps and the burner drills' fuel pauses (acceptance seed 3003 hub S3: 13.2/min measured where the
+        # supply allows exactly 15)
+        cap = min(reds * 0.1 * 60, SUPPLY_EFF * out.get("iron-plate", 0) / 4, SUPPLY_EFF * out.get("copper-plate", 0) / 2)
         out["automation-science-pack"] = round(cap, 1)
     greens = sum(1 for e in mp.ents if alive(e, k) and _x(e).get("role") == "green_am")
     prods = {e.recipe for e in mp.ents if alive(e, k) and _x(e).get("role") == "prod_am"}
@@ -1899,8 +1905,12 @@ def _design_steps(D, world, gd, knobs) -> MasterPlan:
 
 
 def slabel(k) -> str:
-    """Stage label: S0..S5, connector stages S0b / S1b (index k + 0.5)."""
-    return f"S{int(k)}" + ("b" if k != int(k) else "")
+    """Stage label: S0..S5, connector stages S0b / S1b (index k + 0.5), the autopilot's mall right after a starter
+    stage S4m (index k + 0.7, planner/expand.py), expansions S6, S7, ..."""
+    if k == int(k):
+        return f"S{int(k)}"
+    frac = k - int(k)
+    return f"S{int(k)}" + ("b" if abs(frac - 0.5) < 1e-6 else "p" if abs(frac - 0.6) < 1e-6 else "m")
 
 
 def chain_label(chain: str) -> str:
@@ -2887,6 +2897,12 @@ def stage_plan(mp: MasterPlan, k: int, world, gd, state=None, eta=None, status=N
             if _x(e).get("stage", 0) < k and (_x(e).get("fuel") == "manual" or _x(e).get("prime"))]
     if keep:
         stats["keep_fuelled"] = keep[:500]
+    # an autopilot expansion's output / depot chests (planner/expand.py): the helper's first material source
+    mall = [[e.x, e.y] for e in ents if _x(e).get("role") in ("mall_chest", "depot")]
+    if mall:
+        stats["mall_chests"] = mall[:64]
+    if any(_x(e).get("role") == "mall_am" for e in ents):
+        stats["mall_build"] = True        # the mall stage itself: building it is bootstrap (no mall to take from yet)
     summary = stage_summary(mp, k, st, rates)
     p = Plan(id=plan_id(mp, k), title=f"{mp.title}: {slabel(k)} {s.title}", variant=mp.variant, stage=s.key,
              summary=summary, entities=ents, warnings=list(mp.warnings[:2]), validation=vdict, stats=stats,
@@ -3017,17 +3033,18 @@ def score(mp: MasterPlan, eta: dict) -> float:
     return round(0.5 * s0 + 0.5 * s3 + SCORE_BELT * belts, 1)
 
 
-def master_options(world, gd, state=None, goal=None, variants=VARIANTS, allow_removal=False) -> list:
+def master_options(world, gd, state=None, goal=None, variants=VARIANTS, allow_removal=False, allow_cut=True) -> list:
     """Every variant as a full master plan with its roadmap, best first: [(MasterPlan, info)] where info =
     {eta, status, now, card, check, score, recommended}. Variants that cannot be built are left out with a reason
-    in info of the others (key 'not_offered')."""
+    in info of the others (key 'not_offered'). allow_cut=False (the autopilot without the removal setting): routes go
+    around the player's idle belts instead of cutting them."""
     out, reasons = [], []
     for v in variants:
         try:
             # a new belt may cut the player's IDLE belt lines where it crosses them (a few tiles, listed on the card
             # and in the stage's removals, approved with the stage); taking whole builds apart or coal out of their
             # machines needs allow_removal (round 3: off by default)
-            mp = design_master(world, gd, state, goal, v, allow_cut=True)
+            mp = design_master(world, gd, state, goal, v, allow_cut=allow_cut)
         except MasterError as ex:
             reasons.append(f"{TITLES.get(ALIASES.get(v, v), v)}: {ex}")
             continue
