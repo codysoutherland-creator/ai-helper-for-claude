@@ -709,3 +709,11 @@ def test_next_stage_answer_marks_the_asked_stage_skipped(monkeypatch):
                  {"master": "m", "stage": 0, "plan": "m-s0", "attempt": 1}, "plan S0")
     r = ex.do_next_stage(a, snap)
     assert r["ok"] and skipped == {"m-s0"}
+
+
+def test_master_progress_offers_past_a_stage_being_built():
+    # live 0.6.1: S0 kept 3 ghosts it could never place; every later stage waited for it for ever
+    snap = R.Snapshot(masters={"m": {"stages": [
+        {"k": 0, "label": "S0", "plan": "m-s0", "row": {"status": "applied", "built": False}},
+        {"k": 1, "label": "S1", "plan": "m-s1", "row": {"status": "proposed"}}]}})
+    assert R.master_progress(snap, "m")["next"]["plan"] == "m-s1"

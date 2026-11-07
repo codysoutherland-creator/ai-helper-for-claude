@@ -913,11 +913,15 @@ function plans.apply(id)
   end
   hide(p)
   p.result, p.status, p.superseded = r, "applying", nil
-  -- other proposed plans on the same ground (sibling variants) can't be built on top of this one any more
+  -- other proposed plans on the same ground (sibling variants) can't be built on top of this one any more. Stages
+  -- of the same master plan are designed to share ground: they are never replaced by each other (live, 0.6.1: S2
+  -- marked S3 "replaced" and the autopilot stalled on it)
   local bb = p.bbox
+  local pm = p.master or (p.future and p.future.master)
   for _, q in pairs(storage.plans) do
     local qb = q.bbox
-    if q ~= p and q.force == p.force and q.surface == p.surface and q.status == "proposed" and bb and qb and
+    local qm = q.master or (q.future and q.future.master)
+    if q ~= p and not (pm and qm == pm) and q.force == p.force and q.surface == p.surface and q.status == "proposed" and bb and qb and
         qb[1] < bb[3] and bb[1] < qb[3] and qb[2] < bb[4] and bb[2] < qb[4] then
       q.superseded = p.id
       if q.shown then hide(q) end

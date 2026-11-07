@@ -241,8 +241,14 @@ def master_progress(snap: Snapshot, mid: str | None) -> dict:
     def built(s):
         return (s.get("row") or {}).get("built") or s.get("plan") in snap.skipped
 
+    def building(s):
+        return (s.get("row") or {}).get("status") in ("applied", "applying")
+
     done = [s["k"] for s in stages if built(s)]
-    nxt = next((s for s in stages if not built(s)), None)
+    # the next stage to offer skips stages the helper is building: one with a few ghosts it can never place
+    # (something in the way) held every later stage back for ever (live, 0.6.1). The planner checks the order.
+    nxt = next((s for s in stages if not built(s) and not building(s)), None) or \
+        next((s for s in stages if not built(s)), None)
     started = [s["k"] for s in stages if built(s) or
                (s.get("row") or {}).get("status") in ("applied", "applying")]
     return {"done": done, "next": nxt, "all_done": bool(stages) and nxt is None, "stages": stages,

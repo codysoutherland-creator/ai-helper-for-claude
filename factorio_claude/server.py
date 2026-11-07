@@ -611,7 +611,14 @@ def next_stage(master_id: str, show: bool = True, owner: str | None = None) -> d
         return {"error": f"map export failed: {e}"}
     st = _state(cx, cy)
     status = M.stage_status(mp, gd, world)
-    k = next((k for k, v in status.items() if v in ("now", "ready")), None)
+    # a stage the game already builds (applied) is not offered again: re-sending it resets its row to "proposed"
+    # (live, 0.6.1: S0 kept 3 ghosts it could never place, so the planner kept answering S0 and undid its approval)
+    try:
+        started = {str(r.get("id")) for r in call("plan_list") if r.get("status") in ("applied", "applying")}
+    except LinkError:
+        started = set()
+    k = next((k for k, v in status.items() if v in ("now", "ready") and
+              f"{mp.id}-{M.slabel(k).lower()}" not in started), None)
     if k is None:
         waiting = next(((k, M.stage_of(mp, k).gate) for k, v in status.items() if v == "waiting"), None)
         return {"master": mp.id, "status": {M.slabel(k): v for k, v in status.items()},
