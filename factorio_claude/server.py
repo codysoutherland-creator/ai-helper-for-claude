@@ -93,6 +93,32 @@ def factorio_production(window: str = "10m", items: list[str] | None = None, lim
 
 
 @tool
+def factorio_defense(threats: bool = True, radius: float = 400) -> str:
+    """Defence: recent biter attacks (where, what was lost, how long ago, turrets near), how many gun turrets exist
+    and how many are low on ammo, whether gun turrets are researched; threats=True adds the nests within `radius`
+    with the pollution at each (pollution reaching a nest is what sends attacks) and the base's nearest part to it.
+    The mod itself alerts, rebuilds what biters destroy and keeps turrets in ammo; place turret groups with
+    factorio_defend."""
+    try:
+        out = {"status": call("defense_status")}
+        if threats:
+            out["threats"] = call("defense_threats", radius=radius)
+    except LinkError as e:
+        return f"ERROR: {e}"
+    return _jdump(out)
+
+
+@tool
+def factorio_defend(x: float, y: float, toward_x: float | None = None, toward_y: float | None = None,
+                    n: int = 4) -> str:
+    """Place n (1-8) gun-turret ghosts in a row 6 tiles out from x,y toward toward_x,toward_y (an attack spot or a
+    nest), on free ground; the helper builds them and fills them with firearm magazines. Needs gun turrets
+    researched."""
+    return _call("defense_place_turrets", x=x, y=y, toward_x=toward_x, toward_y=toward_y, n=max(1, min(8, int(n))),
+                 plan="defense-chat")
+
+
+@tool
 def factorio_power(surface: str | None = None) -> str:
     """Each electric network: production vs consumption (MW), producers, top consumers."""
     return _call("power", surface=surface)

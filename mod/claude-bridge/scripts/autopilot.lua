@@ -933,7 +933,8 @@ api.register("autopilot_observe", function(args)
   return {tick = game.tick, speed = game.speed, research = research(force), made = made, used = used,
     totals = totals, power = power(surface, force), burners_out = nofuel, burners_out_at = nofuel_at,
     census = census, problems = problems, helper = helper, plans = plan_rows(force), labs = labs(surface, force),
-    enemies = {peaceful = peaceful, spawners = spawners}, autopilot = autopilot.get(true)}
+    enemies = {peaceful = peaceful, spawners = spawners}, autopilot = autopilot.get(true),
+    defense = autopilot.defense_status and select(2, pcall(autopilot.defense_status, force)) or nil}
 end)
 
 ---------------------------------------------------------------------------

@@ -32,6 +32,9 @@ EXPAND_TRIES = 3
 POWER_TIGHT = 0.9               # load / capacity at which power grows whatever the current goal
 LOW_POWER_MACHINES = 3          # more machines than this short of power: grow power
 REVERIFY_MIN = 10.0
+DEFEND_WINDOW_MIN = 30.0        # an attack this recent with no turret near it gets a turret group
+DEFEND_COOLDOWN_MIN = 15.0      # one group per spot per 15 game minutes
+THREAT_EVERY_MIN = 10.0         # nests the pollution reaches are re-read this often
 RED = "automation-science-pack"
 # roadmap template -> planner/expand.py template (the others are the starter base's or research's)
 EXPAND = {"mall": "mall", "power_grow": "power_grow", "steel_column": "steel", "science_block": "science",
@@ -109,6 +112,7 @@ class Snapshot:
     #                                                   "templates": {expansion template: stage index}}
     enemies: dict = field(default_factory=dict)       # {peaceful, spawners}
     skipped: set = field(default_factory=set)         # stage plan ids the planner counts as built (Memory.skipped)
+    defense: dict = field(default_factory=dict)       # defense.lua status: attacks, turrets, low_ammo, researched
 
     @classmethod
     def from_observe(cls, o: dict, masters: dict | None = None, power_gaps=None) -> "Snapshot":
@@ -128,7 +132,7 @@ class Snapshot:
                    census={k: int(v) for k, v in as_dict(o.get("census")).items() if safe_name(k)},
                    problems=as_dict(o.get("problems")), helper=as_dict(o.get("helper")),
                    plans=[as_dict(p) for p in as_list(o.get("plans"))], labs=as_list(o.get("labs")), ap=ap,
-                   masters=masters or {}, enemies=as_dict(o.get("enemies")))
+                   masters=masters or {}, enemies=as_dict(o.get("enemies")), defense=as_dict(o.get("defense")))
 
     # -- derived ----------------------------------------------------------------------------------------------------
     @property
@@ -420,7 +424,7 @@ class Director:
         """First rule that applies. planner_busy: a planner job runs in the background; rules that would start
         another one wait (research, fuel, power poles, helper restarts and verification go on)."""
         self.goals = goals if goals is not None else goal_status(snap, mem.blocked)
-        for rule in (self.r0_safety, self.r1c_research_clean, self.r1_research, self.r1b_bootstrap, self.r4_power,
+        for rule in (self.r0_safety, self.r10_defense, self.r1c_research_clean, self.r1_research, self.r1b_bootstrap, self.r4_power,
                      self.r5_fuel, self.r3_starter, self.r2_next_stage, self.r8_expand, self.r6_helper,
                      self.r7_verify, self.r9_mall):
             if planner_busy and rule in (self.r3_starter, self.r2_next_stage, self.r8_expand):
@@ -703,6 +707,38 @@ class Director:
                 mem.hold("plateau", snap.minute, 30)
                 return Action("plateau", "R8", goal and goal["id"], "every shipped goal is done; research continues",
                               {}, "research")
+        return None
+
+    # R10: defence. Not in a peaceful game. An attack in the last DEFEND_WINDOW_MIN with no turret near it: research gun
+    # turrets first (in front of the queue), then place a turret group facing the attack. Without attacks, a nest the
+    # pollution cloud already reaches gets a group on the base's side facing it (threats are re-read every
+    # THREAT_EVERY_MIN). One group per spot per DEFEND_COOLDOWN_MIN.
+    def r10_defense(self, snap, mem, goal):
+        d = snap.defense
+        if not d or d.get("peaceful") or snap.enemies.get("peaceful"):
+            return None
+        recent = [as_dict(t) for t in as_list(d.get("attacks"))
+                  if float(as_dict(t).get("age_s") or 1e9) <= DEFEND_WINDOW_MIN * 60 and
+                  not int(as_dict(t).get("turrets_near") or 0)]
+        if not d.get("researched"):
+            if recent and "gun-turret" not in snap.research.get("queue", []) and                     snap.research.get("current") != "gun-turret" and mem.ready("defend_research", snap.minute):
+                mem.hold("defend_research", snap.minute, 5)
+                queue = ["gun-turret"] + [t for t in ([snap.research.get("current")] + snap.research.get("queue", []))
+                                          if t and t != "gun-turret"]
+                return Action("research_set", "R10", "G0", "biters attacked and there are no turrets",
+                              {"queue": queue[:6], "removed": []}, "research gun turrets")
+            return None
+        for t in recent:
+            key = f"defend:{int(float(t['x']) // 24)}:{int(float(t['y']) // 24)}"
+            if mem.ready(key, snap.minute):
+                mem.hold(key, snap.minute, DEFEND_COOLDOWN_MIN)
+                return Action("defend", "R10", "G0", f"biters destroyed a {t.get('what')} here",
+                              {"x": t["x"], "y": t["y"], "toward_x": t["x"], "toward_y": t["y"], "n": 4},
+                              "turrets where biters attacked")
+        if mem.ready("threats", snap.minute):
+            mem.hold("threats", snap.minute, THREAT_EVERY_MIN)
+            return Action("defend_threats", "R10", "G0", "check nests the pollution reaches", {},
+                          "check nests near the base")
         return None
 
     # R9: the mall exists but the helper still hand-crafts a lot: name the items (the mall row's reserved slots get

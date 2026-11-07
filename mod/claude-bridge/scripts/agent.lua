@@ -365,7 +365,13 @@ local function step_walk(a, t)
   -- fast travel (setting, on by default): the helper steps straight to free ground at the goal instead of walking.
   -- Mining, smelting and crafting still take their real time; only the walking (most of its day) is skipped.
   if settings.global["claude-helper-fast-travel"].value then
-    local spot = c.surface.find_non_colliding_position("character", final, math.max(radius, 1) + 6, 0.5)
+    -- land at the edge of the walk's radius on the side it comes from, not on the goal: an approach walk (place a
+    -- furnace, insert, mine) otherwise stood on the very tile it was about to build on ("can't place ... blocked")
+    local dx, dy = c.position.x - final.x, c.position.y - final.y
+    local d = math.sqrt(dx * dx + dy * dy)
+    local back = math.max(0, radius - 1)
+    local aim = d > 0 and {x = final.x + dx / d * back, y = final.y + dy / d * back} or final
+    local spot = c.surface.find_non_colliding_position("character", aim, math.max(radius, 1) + 6, 0.5)
     if spot and c.teleport(spot) then
       c.walking_state = {walking = false}
       a.path_state = nil
@@ -2212,6 +2218,67 @@ function tasks.acquire(a, t)
   for i = #plan, 1, -1 do table.insert(a.queue, 1, plan[i]) end
   t.requeued = true
   return "done"
+end
+
+-- {type="rearm", x?, y?, radius?, fill=25, low=10, ammo="firearm-magazine"}: top up gun turrets holding fewer than
+-- `low` magazines to `fill`, nearest first (every turret of the force when no x/y). Magazines come from the helper's
+-- inventory, else one acquire (chests, then crafting: defence is always allowed to hand-craft its ammo).
+local AMMO_TURRETS = {"ammo-turret"}
+
+local function ammo_count(e, ammo)
+  local inv = e.valid and e.get_inventory(defines.inventory.turret_ammo)
+  return inv and inv.get_item_count(ammo) or 0
+end
+
+function tasks.rearm(a, t)
+  local c = a.entity
+  local ammo, fill, low = t.ammo or "firearm-magazine", t.fill or 25, t.low or 10
+  if not t.targets then
+    local f = {type = AMMO_TURRETS, force = c.force}
+    if t.x then f.position, f.radius = {x = t.x, y = t.y}, t.radius or 40 end
+    t.targets = {}
+    local need = 0
+    for _, e in pairs(c.surface.find_entities_filtered(f)) do
+      local k = ammo_count(e, ammo)
+      if k < low then t.targets[#t.targets + 1] = e; need = need + fill - k end
+    end
+    if #t.targets == 0 then return "done" end
+    t.need = need
+  end
+  local carry = c.get_item_count(ammo)
+  if carry == 0 then
+    if t.fetched then
+      alog(a, "rearm: no " .. ammo .. " to hand out")
+      return "done"
+    end
+    t.fetched = true
+    table.insert(a.queue, 1, t)
+    table.insert(a.queue, 1, {type = "acquire", item = ammo, count = math.min(t.need, 200), bootstrap = true, soft = true})
+    t.requeued = true
+    return "done"
+  end
+  local best, bi, bd
+  for i, e in ipairs(t.targets) do
+    if e.valid and ammo_count(e, ammo) < fill then
+      local d = dist(e.position, c.position)
+      if not bd or d < bd then best, bi, bd = e, i, d end
+    end
+  end
+  if not best then
+    alog(a, "rearm: turrets topped up")
+    return "done"
+  end
+  local near = ensure_near(a, t, best.position, c.reach_distance)
+  if near == nil then table.remove(t.targets, bi); t.approach = nil; return "running" end
+  if not near then return "running" end
+  c.walking_state = {walking = false}
+  local inv = best.get_inventory(defines.inventory.turret_ammo)
+  local want = math.min(fill - ammo_count(best, ammo), c.get_item_count(ammo))
+  local n = want > 0 and inv.insert{name = ammo, count = want} or 0
+  if n > 0 then c.remove_item{name = ammo, count = n} end
+  table.remove(t.targets, bi)
+  t.approach = nil
+  return "running"
 end
 
 -- {type="wait_collect", x, y, name, item, count, max_wait}: walk to a mall machine (or a filling chest) and take

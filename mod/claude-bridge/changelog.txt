@@ -1,4 +1,23 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.7.0
+Date: 2026-11-07
+  Features:
+    - Defence. When biters destroy something of yours you get a chat alert with a map pin, a ghost takes its place and
+      the helper rebuilds it. Gun turrets are checked every minute and the helper brings firearm magazines (from
+      chests, or crafted from iron) to any holding fewer than 10.
+    - The autopilot defends: after an attack with no turret near it, gun turrets go to the front of the research
+      queue, then a group of 4 turrets is placed facing the attack; nests the pollution cloud reaches get a group on
+      the side of the base facing them.
+    - Claude in chat: factorio_defense (attacks, turrets, ammo, nests and their pollution) and factorio_defend (place
+      a turret group).
+    - New settings: "Defence: rebuild what biters destroy" and "Defence: keep gun turrets in ammo" (both on).
+  Bugfixes:
+    - Mining outpost blueprint: the west drill column had no power (poles on both sides now).
+    - Fast travel no longer lands the helper on the tile it is about to build on ("can't place ... blocked").
+    - Autopilot: stages of one master plan no longer mark each other replaced; a stage being built is not offered
+      again; later stages are offered while an earlier one still has a few unplaceable ghosts.
+    - Plans tab sorted by what you need to do; chat shows the time of each message, no cost line.
+---------------------------------------------------------------------------------------------------
 Version: 0.6.1
 Date: 2026-11-07
   Bugfixes:

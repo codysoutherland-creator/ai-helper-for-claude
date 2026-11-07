@@ -21,10 +21,10 @@ CHAT_TOOLS = (
     # look
     "factorio_overview", "factorio_production", "factorio_power", "factorio_research", "factorio_problems",
     "factorio_inspect", "factorio_find", "factorio_resources", "factorio_map", "factorio_census",
-    "factorio_foreman_report", "factorio_mark",
+    "factorio_foreman_report", "factorio_mark", "factorio_defense",
     # small, reversible actions (argument limits enforced by the server in chat mode)
     "factorio_place_ghosts", "factorio_clear_claude_ghosts", "factorio_set_recipe", "factorio_deconstruct",
-    "factorio_queue_research",
+    "factorio_queue_research", "factorio_defend",
     # helper character (free actions and its task queue)
     "factorio_quick_action", "factorio_agent_status", "factorio_agent_do", "factorio_agent_stop",
     # planner: proposes; the player approves in the Plans tab
@@ -56,7 +56,7 @@ AUTOPILOT_TOOLS = (
     "factorio_overview", "factorio_production", "factorio_power", "factorio_research", "factorio_problems",
     "factorio_inspect", "factorio_find", "factorio_resources", "factorio_map", "factorio_census",
     "factorio_foreman_report", "factorio_agent_status", "plan_list", "plan_roadmap", "world_summary",
-    "factorio_queue_research",
+    "factorio_queue_research", "factorio_defense",
 ) + AUTOPILOT_ONLY
 
 # never in the autopilot's list (tests/test_security.py)

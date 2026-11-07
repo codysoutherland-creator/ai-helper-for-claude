@@ -361,6 +361,28 @@ class Executor:
                 return {"ok": False, "error": str(e), "queued": out}
         return {"ok": True, "queued": out}
 
+    def do_defend(self, a, snap):
+        args = {k: a.args[k] for k in ("x", "y", "toward_x", "toward_y", "n") if k in a.args}
+        r = self.call("defense_place_turrets", plan=f"defense-{snap.tick // 60}", **args)
+        return {"ok": bool((r or {}).get("placed")), "placed": len((r or {}).get("placed") or []), "at": (r or {}).get("at")}
+
+    def do_defend_threats(self, a, snap):
+        """Nests whose chunk the pollution reaches: a turret group between the nearest part of the base and each (at
+        most 2 per check), unless turrets already stand within 24 tiles of that spot."""
+        threats = [t for t in as_list(self.call("defense_threats", radius=400)) if isinstance(t, dict)]
+        out = []
+        for t in threats:
+            base = as_dict(t.get("base"))
+            if float(t.get("pollution") or 0) <= 0 or not base or len(out) >= 2:
+                continue
+            if any(abs(o["x"] - base["x"]) < 24 and abs(o["y"] - base["y"]) < 24 for o in out):
+                continue
+            r = self.call("defense_place_turrets", x=base["x"], y=base["y"], toward_x=t["x"], toward_y=t["y"], n=4,
+                          plan=f"defense-{snap.tick // 60}-{len(out)}", skip_if_turrets=24)
+            if (r or {}).get("placed"):
+                out.append({"x": base["x"], "y": base["y"], "nest": [t["x"], t["y"]], "placed": len(r["placed"])})
+        return {"ok": True, "groups": out, "threats": len(threats)}
+
     def do_bootstrap_packs(self, a, snap):
         x, y = a.args["lab"]
         if not snap.helper.get("alive"):

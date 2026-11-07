@@ -717,3 +717,32 @@ def test_master_progress_offers_past_a_stage_being_built():
         {"k": 0, "label": "S0", "plan": "m-s0", "row": {"status": "applied", "built": False}},
         {"k": 1, "label": "S1", "plan": "m-s1", "row": {"status": "proposed"}}]}})
     assert R.master_progress(snap, "m")["next"]["plan"] == "m-s1"
+
+
+def _defense_snap(**d):
+    base = {"peaceful": False, "researched": True, "attacks": [], "turrets": 0, "low_ammo": 0}
+    base.update(d)
+    return R.Snapshot(tick=3600 * 100, defense=base, enemies={"peaceful": False, "spawners": 1})
+
+
+def test_defense_researches_turrets_after_an_attack():
+    snap = _defense_snap(researched=False, attacks=[{"x": 100, "y": 48, "what": "transport-belt", "age_s": 60,
+                                                      "turrets_near": 0}])
+    snap.research = {"current": "logistics", "queue": ["logistics"], "done": set()}
+    a = R.Director().r10_defense(snap, R.Memory(), None)
+    assert a.kind == "research_set" and a.args["queue"][0] == "gun-turret"
+
+
+def test_defense_places_turrets_where_biters_attacked_once():
+    snap = _defense_snap(attacks=[{"x": 100, "y": 48, "what": "transport-belt", "age_s": 60, "turrets_near": 0}])
+    mem = R.Memory()
+    a = R.Director().r10_defense(snap, mem, None)
+    assert a.kind == "defend" and (a.args["x"], a.args["y"]) == (100, 48)
+    assert R.Director().r10_defense(snap, mem, None).kind == "defend_threats"   # same spot: cooled down
+
+
+def test_defense_quiet_in_a_peaceful_game_and_for_covered_or_old_attacks():
+    assert R.Director().r10_defense(_defense_snap(peaceful=True), R.Memory(), None) is None
+    snap = _defense_snap(attacks=[{"x": 1, "y": 1, "age_s": 60, "turrets_near": 3},
+                                  {"x": 9, "y": 9, "age_s": 99999, "turrets_near": 0}])
+    assert R.Director().r10_defense(snap, R.Memory(), None).kind == "defend_threats"
