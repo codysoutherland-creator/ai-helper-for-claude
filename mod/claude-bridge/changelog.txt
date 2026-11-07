@@ -1,4 +1,9 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.7.1
+Date: 2026-11-07
+  Bugfixes:
+    - Starter base on a new freeplay map: the crash-site wreck near spawn no longer stops the planner.
+---------------------------------------------------------------------------------------------------
 Version: 0.7.0
 Date: 2026-11-07
   Features:
