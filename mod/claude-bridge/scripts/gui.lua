@@ -411,15 +411,22 @@ function refresh_tab.ask(player, c, st)
   if #hist == 0 then
     wrap_label(sp, nil, "[color=0.7,0.7,0.7]No messages yet. Free commands: type @claude help in chat.[/color]").style.width = TEXT_W - 16
   end
-  for _, h in ipairs(hist) do
+  for i, h in ipairs(hist) do
+    local newest = i == #hist
+    local old = h.tick and game.tick - h.tick > 60 * 60 * 10   -- older than 10 minutes: dimmed
     local who = h.who == "Claude" and "[color=0.85,0.47,0.34]Claude[/color]" or ("[font=default-bold]" .. tostring(h.who) .. "[/font]")
-    local l = sp.add{type = "label", caption = who .. ": " .. tostring(h.text)}
+    local when = ""
+    if h.tick then   -- game time of day played (h:mm): stays right without refreshing, unlike "2 min ago"
+      local m = math.floor(h.tick / 3600)
+      when = "[color=0.55,0.55,0.55]" .. string.format("%d:%02d", math.floor(m / 60), m % 60) .. "[/color]"
+    end
+    local hl = sp.add{type = "label", caption = who .. "  " .. when}
+    hl.style.font = "default-small"
+    hl.style.top_margin = i > 1 and 6 or 0
+    local l = sp.add{type = "label", caption = old and ("[color=0.6,0.6,0.6]" .. tostring(h.text) .. "[/color]") or tostring(h.text)}
     l.style.single_line = false
     l.style.width = TEXT_W - 16
-    if h.cost then
-      local cl = sp.add{type = "label", caption = "[color=0.55,0.55,0.55]" .. tostring(h.cost) .. "[/color]"}
-      cl.style.font = "default-small"
-    end
+    if newest and h.who == "Claude" then l.style.font = "default-semibold" end
   end
   sp.scroll_to_bottom()
 end
@@ -427,8 +434,7 @@ end
 local function hex(l) return l[3] .. "," .. l[4] .. "," .. l[5] end
 
 function build_tab.plans(player, c, st)
-  wrap_label(c, nil, "[color=0.75,0.75,0.75]Plans Claude proposes show up here. Preview and Approve are free: " ..
-    "approving places ghosts for the helper and robots to build.[/color]")
+  wrap_label(c, nil, "[color=0.75,0.75,0.75]Claude's plans, sorted by what you need to do. Preview colours:[/color]")
   local lg = c.add{type = "table", name = "claude_plans_legend", column_count = 3}
   lg.style.horizontal_spacing = 10
   lg.style.vertical_spacing = 0
@@ -585,7 +591,7 @@ local function roadmap_rows(sp, future)
     if a.future.master ~= b.future.master then return a.future.master < b.future.master end
     return (a.future.order or 0) < (b.future.order or 0)
   end)
-  local lines = {"[font=default-bold]Roadmap (later stages, offered when ready)[/font]"}
+  local lines = {}
   for _, p in ipairs(future) do
     local missing, built = plans.waiting_for(p)
     local why = {}
@@ -599,35 +605,157 @@ local function roadmap_rows(sp, future)
   l.style.maximal_width = TEXT_W - 20
 end
 
+-- unbuilt ghosts of an applied plan (within its box)
+local function ghosts_left(p)
+  local surface = game.get_surface(p.surface)
+  local bb = p.bbox
+  if not (surface and bb) then return 0 end
+  local n = 0
+  for _, g in pairs(surface.find_entities_filtered{area = {{bb[1] - 1, bb[2] - 1}, {bb[3] + 1, bb[4] + 1}},
+      type = "entity-ghost", force = p.force}) do
+    local ok, tags = pcall(function() return g.tags end)
+    if ok and type(tags) == "table" and tags.claude_plan == p.id then n = n + 1 end
+  end
+  return n
+end
+
+local function section(sp, text)
+  local l = sp.add{type = "label", caption = "[font=default-bold]" .. text .. "[/font]"}
+  l.style.top_margin = 6
+  return l
+end
+
+-- one line for a plan that needs nothing from the player (being built / done / replaced)
+local function plan_line(sp, p, text, buttons)
+  local row = sp.add{type = "flow", direction = "horizontal"}
+  row.style.vertical_align = "center"
+  row.style.horizontally_stretchable = true
+  local l = row.add{type = "label", caption = text}
+  l.style.single_line = false
+  l.style.maximal_width = TEXT_W - 30 - 64 * #buttons
+  l.style.horizontally_stretchable = true
+  for _, b in ipairs(buttons) do
+    if b == "show" then
+      row.add{type = "sprite-button", name = "claude_plan_show|" .. p.id, sprite = "utility/gps_map_icon",
+        style = "tool_button", tooltip = "Look at it (opens remote view at the plan).",
+        tags = {plan_action = "show", plan = p.id}}
+    elseif b == "build" then
+      plan_button(row, "build", p.id, "Build", nil, "Send the helper to build what is left of it. Free.", 60)
+    elseif b == "dismiss" then
+      plan_button(row, "dismiss", p.id, "Hide", "back_button", "Remove it from this list (what is built stays).", 50)
+    end
+  end
+end
+
+-- Plans tab, sorted by what the player has to do: a "what now" line, then Needs you / Autopilot builds next /
+-- Building now / Coming up / Done (folded). Replaced and finished plans no longer fill the list.
 function refresh_tab.plans(player, c, st)
   c.claude_plans_msg.caption = st.plan_msg or ""
   c.claude_plans_msg.visible = (st.plan_msg or "") ~= ""
   local all = plans.list(player.force.name)
-  local list, future = {}, {}
-  for _, p in ipairs(all) do
-    if p.status == "future" then future[#future + 1] = p else list[#list + 1] = p end
-  end
   local sig = ""
+  local live = false
   for _, p in ipairs(all) do
     sig = sig .. p.id .. ":" .. p.status .. ":" .. tostring(p.shown) .. ":" .. (p.seq or 0) .. ":" ..
       #p.entities .. ":" .. (p.result and p.result.tick or "") .. ":" .. tostring(p.superseded) .. ";"
+    if p.status ~= "proposed" or (storage.autopilot and storage.autopilot.approve_queue and
+        storage.autopilot.approve_queue[p.id]) then live = true end
   end
-  if #future > 0 then sig = sig .. "|" .. math.floor(game.tick / 600) end   -- waiting lines refresh every 10 s
+  if live then sig = sig .. "|" .. math.floor(game.tick / 300) end   -- counts and timers refresh every 5 s
+  sig = sig .. "|" .. tostring(st.plans_show_done) .. "|" .. table_size(st.plans_hidden or {})
   local sp = c.claude_plans_list
   if st.plans_sig == sig and #sp.children > 0 then return end
   st.plans_sig = sig
   sp.clear()
   if #all == 0 then
-    wrap_label(sp, nil, "[color=0.7,0.7,0.7]No plans yet. Ask Claude for one, e.g. \"set me up with a starter base\".[/color]")
+    wrap_label(sp, nil, "[color=0.7,0.7,0.7]No plans yet. Ask Claude for one, e.g. \"set me up with a starter base\", " ..
+      "or tick Let Claude play on the Helper tab.[/color]")
     return
   end
-  for _, p in ipairs(list) do
-    local ok, err = pcall(plan_card, sp, p)
-    if not ok then log("claude-bridge plan card " .. tostring(p.id) .. ": " .. tostring(err)) end
+  local apq = storage.autopilot and storage.autopilot.on and storage.autopilot.approve_queue or {}
+  local hidden = st.plans_hidden or {}
+  local need, auto, building, future, done, old = {}, {}, {}, {}, {}, {}
+  for _, p in ipairs(all) do
+    if hidden[p.id] then -- cleared from this player's list
+    elseif p.status == "future" then future[#future + 1] = p
+    elseif p.status == "proposed" and p.superseded then old[#old + 1] = p
+    elseif p.status == "proposed" and apq[p.id] then auto[#auto + 1] = p
+    elseif p.status == "proposed" then need[#need + 1] = p
+    elseif p.status == "applying" then building[#building + 1] = {p, nil}
+    else
+      local left = ghosts_left(p)
+      local rm = (p.removes and #p.removes > 0) and plans.removal_counts(p) or nil
+      local removing = rm and rm.marked > rm.removed
+      if left > 0 or removing then building[#building + 1] = {p, left, rm} else done[#done + 1] = p end
+    end
+  end
+  -- what now (one line)
+  local now
+  if #need > 0 then
+    now = "[color=1,0.8,0.4]Your turn:[/color] look at [font=default-bold]" .. tostring(need[1].title) ..
+      "[/font] below and Approve or Reject it."
+  elseif #auto > 0 then
+    local q = apq[auto[1].id]
+    now = "[color=0.4,0.8,1]The autopilot builds[/color] [font=default-bold]" .. tostring(auto[1].title) ..
+      "[/font] in " .. math.max(0, math.ceil((q.due - game.tick) / 60)) .. " s. Reject it below to stop that."
+  elseif #building > 0 then
+    local p, left = building[1][1], building[1][2]
+    now = "[color=0.4,0.9,0.4]Building:[/color] [font=default-bold]" .. tostring(p.title) .. "[/font]" ..
+      (left and (" - " .. left .. " ghosts left") or "") .. ". Nothing to do."
+  elseif #future > 0 then
+    now = "Nothing to do right now. The next stage is offered here when its research is done."
+  else
+    now = "Nothing to do. Ask Claude for a plan, or tick Let Claude play on the Helper tab."
+  end
+  local nf = sp.add{type = "frame", style = "inside_shallow_frame_with_padding", direction = "vertical"}
+  nf.style.horizontally_stretchable = true
+  local nl = nf.add{type = "label", caption = now}
+  nl.style.single_line = false
+  nl.style.maximal_width = TEXT_W - 40
+
+  local function cards(title, list)
+    if #list == 0 then return end
+    section(sp, title)
+    for _, p in ipairs(list) do
+      local ok, err = pcall(plan_card, sp, p)
+      if not ok then log("claude-bridge plan card " .. tostring(p.id) .. ": " .. tostring(err)) end
+    end
+  end
+  cards("Needs you", need)
+  cards("Autopilot builds next", auto)
+  if #building > 0 then
+    section(sp, "Building now")
+    for _, b in ipairs(building) do
+      local p, left, rm = b[1], b[2], b[3]
+      local bits = {}
+      if left then bits[#bits + 1] = left .. " of " .. #p.entities .. " left" else bits[#bits + 1] = "placing ghosts" end
+      if rm and rm.marked > rm.removed then bits[#bits + 1] = "taking apart " .. (rm.marked - rm.removed) .. " old" end
+      plan_line(sp, p, tostring(p.title) .. "  [color=0.6,0.6,0.6]" .. table.concat(bits, " · ") .. "[/color]",
+        {"show", "build"})
+    end
   end
   if #future > 0 then
+    section(sp, "Coming up")
     local ok, err = pcall(roadmap_rows, sp, future)
     if not ok then log("claude-bridge roadmap rows: " .. tostring(err)) end
+  end
+  if #done + #old > 0 then
+    local row = sp.add{type = "flow", direction = "horizontal"}
+    row.style.top_margin = 6
+    row.style.vertical_align = "center"
+    row.add{type = "label", caption = "[font=default-bold]Done[/font] [color=0.6,0.6,0.6](" .. #done .. " built" ..
+      (#old > 0 and (", " .. #old .. " replaced") or "") .. ")[/color]"}
+    local tb = row.add{type = "button", name = "claude_plans_done_toggle", caption = st.plans_show_done and "Fold" or "Show"}
+    tb.style.minimal_width = 50
+    local cb = row.add{type = "button", name = "claude_plans_clear_done", caption = "Clear list", style = "back_button",
+      tooltip = "Take finished and replaced plans off this list. Nothing in the world changes."}
+    cb.style.minimal_width = 70
+    if st.plans_show_done then
+      for _, p in ipairs(done) do plan_line(sp, p, "[color=0.6,0.6,0.6]built: " .. tostring(p.title) .. "[/color]", {"show"}) end
+      for _, p in ipairs(old) do
+        plan_line(sp, p, "[color=0.5,0.5,0.5]replaced: " .. tostring(p.title) .. "[/color]", {"dismiss"})
+      end
+    end
   end
 end
 
@@ -1054,6 +1182,26 @@ local function on_click(e)
   if name == "claude_clear_no" then return clear_ghosts(player, "no") end
   if name == "claude_confirm_run" then return answer_confirm(player, el, true) end
   if name == "claude_confirm_cancel" then return answer_confirm(player, el, false) end
+  if name == "claude_plans_done_toggle" then
+    local st = pstate(player)
+    st.plans_show_done = not st.plans_show_done
+    return gui.refresh(player, "plans")
+  end
+  if name == "claude_plans_clear_done" then
+    -- hidden for this player only: the plans stay in storage (the autopilot tracks its stages by their rows)
+    local st = pstate(player)
+    st.plans_hidden = st.plans_hidden or {}
+    local n = 0
+    for _, p in ipairs(plans.list(player.force.name)) do
+      if not st.plans_hidden[p.id] and ((p.status == "applied" and plans.stage_built(p)) or
+          (p.status == "proposed" and p.superseded)) then
+        st.plans_hidden[p.id] = true
+        n = n + 1
+      end
+    end
+    pstate(player).plan_msg = "Took " .. n .. " finished or replaced plan(s) off the list."
+    return gui.refresh(player, "plans")
+  end
   if el.tags and el.tags.plan_action then return plan_click(player, el) end
 end
 
