@@ -402,7 +402,7 @@ class Executor:
         # autopilot asks for it again every few minutes for ever (seen live: S0 superseded, the planner answering S1)
         asked = str(a.args.get("plan") or "").rsplit("-", 1)[-1].upper()
         if asked and r.get("stage") and r["stage"] != asked and (r.get("status") or {}).get(asked) == "done":
-            self.mem.skipped.add(a.args["plan"])
+            snap.skipped.add(a.args["plan"])          # the Autopilot's Memory.skipped (same set, see observe)
         return {"ok": "error" not in r and bool(r.get("stage")), "stage": r.get("stage"), "valid": r.get("valid"),
                 "error": r.get("error"), "waiting_for": r.get("waiting_for")}
 

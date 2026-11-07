@@ -691,3 +691,21 @@ def test_master_progress_skips_stages_the_planner_counts_built():
     snap.skipped = {"m-s0"}
     mp = R.master_progress(snap, "m")
     assert mp["next"]["plan"] == "m-s1" and mp["done"] == [0]
+
+
+def test_next_stage_answer_marks_the_asked_stage_skipped(monkeypatch):
+    from factorio_claude import autopilot as AP
+    ex = AP.Executor(call=lambda *a, **k: {}, journal=None)
+
+    class FakeServer:
+        @staticmethod
+        def next_stage(master, show=True, owner=None):
+            return {"stage": "S1", "status": {"S0": "done", "S1": "now"}, "valid": True}
+
+    monkeypatch.setattr(ex, "_server", lambda: FakeServer)
+    skipped = set()
+    snap = R.Snapshot(skipped=skipped)
+    a = R.Action("next_stage", "R2", "G1", "S0 blocked: superseded",
+                 {"master": "m", "stage": 0, "plan": "m-s0", "attempt": 1}, "plan S0")
+    r = ex.do_next_stage(a, snap)
+    assert r["ok"] and skipped == {"m-s0"}
