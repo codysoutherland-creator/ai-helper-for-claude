@@ -656,7 +656,7 @@ class _Designer:
         tiles = []
         for e in self.world.entities_in(self.rect):
             name = e.name[6:] if e.name.startswith("ghost:") else e.name
-            p = gd.entity(name) or {}
+            p = gd.entity_or_empty(name)
             if e.dir is None:
                 continue
             if p.get("type") == "inserter":

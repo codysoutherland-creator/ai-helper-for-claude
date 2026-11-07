@@ -110,6 +110,10 @@ class GameData:
             raise KeyError(f"unknown {kind[:-1]} {name!r}") from None
 
     def entity(self, name: str) -> dict: return self._get("entities", name)
+
+    def entity_or_empty(self, name: str) -> dict:
+        """An entity found on the map that the data export may not list (the freeplay crash-site wreck): {}."""
+        return self.raw["entities"].get(name) or {}
     def recipe(self, name: str) -> dict: return self._get("recipes", name)
     def item(self, name: str) -> dict: return self._get("items", name)
     def fluid(self, name: str) -> dict: return self._get("fluids", name)
