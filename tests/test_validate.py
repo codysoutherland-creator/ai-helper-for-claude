@@ -123,12 +123,11 @@ def test_generator_blocks():
     assert "inserter_throughput" in kinds(strict)
 
 
-def test_mining_outpost_generator_west_column_unpowered():
-    """blueprints.mining_outpost: poles only reach the east drills (confirmed in-engine)."""
+def test_mining_outpost_generator_powers_both_columns():
+    """blueprints.mining_outpost: every drill is covered (the west column had no power before 0.6.1; seen live)."""
     c = next(c for c in GEN if c["name"] == "gen_mining_outpost")
     rep = run(c)
-    assert sorted((i.x, i.y) for i in rep.errors if i.kind == "power_coverage") == \
-        [(1.5, 1.5), (1.5, 4.5), (1.5, 7.5), (1.5, 10.5)] and kinds(rep) == {"power_coverage"}
+    assert not [i for i in rep.errors if i.kind == "power_coverage"], rep.summary(20)
 
 
 def test_solar_block_alone():

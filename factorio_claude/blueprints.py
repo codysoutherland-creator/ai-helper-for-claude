@@ -144,8 +144,9 @@ def assembler_line(count=6, recipe="iron-gear-wheel", machine="assembling-machin
 
 
 def mining_outpost(rows=4, drill="electric-mining-drill", belt="transport-belt", pole="small-electric-pole"):
-    """Two columns of 3x3 drills facing a shared belt in the middle, poles between pairs."""
-    ents = []
+    """Two columns of 3x3 drills facing a shared belt in the middle. Poles on both outer sides (a small pole covers
+    only one drill column) and one above the west drills that wires the two pole lines together (8 tiles apart)."""
+    ents = [{"name": pole, "x": 1.5, "y": -0.5}]
     for i in range(rows):
         y = i * 3 + 1.5
         ents.append({"name": drill, "x": 1.5, "y": y, "direction": "east"})
@@ -154,6 +155,7 @@ def mining_outpost(rows=4, drill="electric-mining-drill", belt="transport-belt",
             ents.append({"name": belt, "x": 3.5, "y": i * 3 + dy + 0.5, "direction": "north"})
         if i % 2 == 0:
             ents.append({"name": pole, "x": 7.5, "y": y})
+            ents.append({"name": pole, "x": -0.5, "y": y})
     return ents
 
 

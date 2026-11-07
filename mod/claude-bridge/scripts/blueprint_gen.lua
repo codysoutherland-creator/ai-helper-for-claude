@@ -100,6 +100,9 @@ end
 
 function gen.mining_outpost(p)
   local ents, belt, pole = {}, p.belt or "transport-belt", p.pole or "small-electric-pole"
+  -- poles on both outer sides (one small pole covers one drill column; live, 0.6.1: the west drills had no power)
+  -- and one above the west drills joining the two pole lines (8 tiles apart, out of a small pole's reach)
+  ents[#ents + 1] = {name = pole, x = 1.5, y = -0.5}
   for i = 0, p.rows - 1 do
     local y = i * 3 + 1.5
     ents[#ents + 1] = {name = p.drill, x = 1.5, y = y, direction = "east"}
@@ -107,7 +110,10 @@ function gen.mining_outpost(p)
     for dy = 0, 2 do
       ents[#ents + 1] = {name = belt, x = 3.5, y = i * 3 + dy + 0.5, direction = "north"}
     end
-    if i % 2 == 0 then ents[#ents + 1] = {name = pole, x = 7.5, y = y} end
+    if i % 2 == 0 then
+      ents[#ents + 1] = {name = pole, x = 7.5, y = y}
+      ents[#ents + 1] = {name = pole, x = -0.5, y = y}
+    end
   end
   return ents
 end

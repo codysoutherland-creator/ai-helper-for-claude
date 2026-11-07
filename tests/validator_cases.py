@@ -284,7 +284,7 @@ def _gen_cases():
                     expect={"sources": [{"x": 0.5, "y": 6.5, "direction": N, "item": "iron-plate"}],
                             "sinks": [{"x": 6.5, "y": -0.5}], "power": "external"},
                     works=counted("gen_assembler_line_gears", 6.5, -2.5, "iron-gear-wheel", 30)))
-    # electric mining outpost on iron: the generator's poles sit east of the east drills only
+    # electric mining outpost on iron: poles on both sides, joined above the west drills
     ents = gen_entities(bp.mining_outpost(4))
     extras = [{"name": "loader", "x": 3.5, "y": -1, "direction": N, "ug": "input"},
               {"name": "wooden-chest", "x": 3.5, "y": -2.5}, _eei(9, 2)]
@@ -294,7 +294,7 @@ def _gen_cases():
         idle = [v["pos"] for v in drills if v.get("net") is None]
         n = eng.contents("gen_mining_outpost", 3.5, -2.5)
         return not idle and n > 0, f"{n} ore delivered; drills without power: {idle}"
-    out.append(case("gen_mining_outpost", ents, {"power_coverage"}, ore("iron-ore", -1, -1, 7, 12),
+    out.append(case("gen_mining_outpost", ents, (), ore("iron-ore", -1, -1, 7, 12),
                     extras=extras, ticks=1800, expect={"sinks": [{"x": 3.5, "y": -0.5}], "power": "external"},
                     works=outpost_works))
     return out
