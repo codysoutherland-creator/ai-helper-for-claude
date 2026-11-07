@@ -398,6 +398,11 @@ class Executor:
     def do_next_stage(self, a, snap):
         S = self._server()
         r = S.next_stage(a.args["master"], show=False, owner="autopilot")
+        # the planner re-reads the map: a stage it reports done (it answers with a later one) is built, else the
+        # autopilot asks for it again every few minutes for ever (seen live: S0 superseded, the planner answering S1)
+        asked = str(a.args.get("plan") or "").rsplit("-", 1)[-1].upper()
+        if asked and r.get("stage") and r["stage"] != asked and (r.get("status") or {}).get(asked) == "done":
+            self.mem.skipped.add(a.args["plan"])
         return {"ok": "error" not in r and bool(r.get("stage")), "stage": r.get("stage"), "valid": r.get("valid"),
                 "error": r.get("error"), "waiting_for": r.get("waiting_for")}
 
@@ -910,6 +915,7 @@ class Autopilot:
             self.last_gaps_tick = tick
         masters = self.masters_from(as_list(o.get("plans")))
         snap = Snapshot.from_observe(o, masters, power_gaps=self.gaps)
+        snap.skipped = self.mem.skipped
         self._snap = snap
         if self.job is not None and self.job.done:
             self._finish_job(ap, snap)

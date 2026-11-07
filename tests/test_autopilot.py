@@ -680,3 +680,14 @@ def test_power_grows_when_machines_lack_it_even_before_g4():
     m2.latched |= {"G2"}
     d.goals = R.goal_status(s, m2.blocked, m2)
     assert d.r8_expand(s, m2, None) is None
+
+
+def test_master_progress_skips_stages_the_planner_counts_built():
+    # live 0.6.0: S0 was superseded in the mod but the planner found it built; the autopilot asked for S0 for ever
+    snap = R.Snapshot(masters={"m": {"stages": [
+        {"k": 0, "label": "S0", "plan": "m-s0", "row": {"status": "proposed", "superseded": "m-s1"}},
+        {"k": 1, "label": "S1", "plan": "m-s1", "row": {"status": "applied"}}]}})
+    assert R.master_progress(snap, "m")["next"]["plan"] == "m-s0"
+    snap.skipped = {"m-s0"}
+    mp = R.master_progress(snap, "m")
+    assert mp["next"]["plan"] == "m-s1" and mp["done"] == [0]

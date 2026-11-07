@@ -19,7 +19,10 @@ local agent = require("scripts.agent")
 local autopilot = {}
 autopilot.on_change = function() end   -- gui.lua overrides it (refresh the Helper tab and the status line)
 
-local KEEPOUT_TTL = 60 * 60 * 15   -- a player's build keeps its ground for 15 game minutes
+local KEEPOUT_TTL = 60 * 60 * 3    -- a player's build keeps its ground for 3 game minutes
+-- a plan deferred this long is applied anyway: ghosts don't get in the player's way, and a player who plays in the
+-- middle of the base kept every stage waiting for ever (live, 0.6.0: "waiting for you to finish nearby" all session)
+local MAX_DEFER_TICKS = 60 * 60 * 3
 local KEEPOUT_MAX = 200
 local MILESTONES_MAX = 50
 local EVENTS_MAX = 40
@@ -404,7 +407,7 @@ local function process_queue()
       else
         boxes = boxes or autopilot.keepout_boxes()
         local hit = boxes_hit(p.bbox, boxes)
-        if hit then
+        if hit and game.tick - q.first_tick < MAX_DEFER_TICKS then
           q.due = game.tick + DEFER_TICKS
           q.deferred = (q.deferred or 0) + 1
           s.waiting_for = {x = (hit[1] + hit[3]) / 2, y = (hit[2] + hit[4]) / 2, why = hit[5]}

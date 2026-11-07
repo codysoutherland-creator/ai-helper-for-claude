@@ -159,8 +159,10 @@ block is appended to the same master plan as a new stage (S4m, S6, S7, ...), nev
 in this version yet: when everything it can build is built and no research is left, it says so once ("Done for this
 version: next would be ...") and keeps the base running, without spending Claude calls. While the planner works on a
 sped-up test game (game.speed above 1) the game runs at normal speed until the plan is ready. Mod settings (Map): may
-take apart your builds (off), keep-out radius (16), seconds before it builds (30), helper may take from my inventory
-(off), Claude calls per hour (6). `config.json`: `autopilot` (true: the companion runs the loop),
+take apart your builds (on: it may dismantle and rebuild to automate or scale up; each plan lists what it removes),
+keep-out radius (8; a plan near you waits at most 3 minutes), seconds before it builds (30), helper may take from my
+inventory (off), Claude calls per hour (6), helper fast travel (on: it steps straight to where it works; mining,
+smelting and crafting still take their real time). `config.json`: `autopilot` (true: the companion runs the loop),
 `autopilot_calls_per_hour`, `autopilot_min_gap_s` (180), `autopilot_min_gap_game_s` (300), `autopilot_model` (default
 `chat_model`). Its journal is `logs/autopilot.jsonl`; in Claude Code, `factorio_autopilot` switches it and
 `factorio_autopilot_report` summarises the journal.

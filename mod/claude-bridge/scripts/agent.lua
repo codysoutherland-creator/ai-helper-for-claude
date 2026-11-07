@@ -362,6 +362,16 @@ local function step_walk(a, t)
     a.path_state = nil
     return "done"
   end
+  -- fast travel (setting, on by default): the helper steps straight to free ground at the goal instead of walking.
+  -- Mining, smelting and crafting still take their real time; only the walking (most of its day) is skipped.
+  if settings.global["claude-helper-fast-travel"].value then
+    local spot = c.surface.find_non_colliding_position("character", final, math.max(radius, 1) + 6, 0.5)
+    if spot and c.teleport(spot) then
+      c.walking_state = {walking = false}
+      a.path_state = nil
+      if dist(c.position, final) <= radius then return "done" end   -- else it walks the last few tiles
+    end
+  end
   -- on the way to an intermediate leg point (the direct path request failed)
   if t.via and dist(c.position, t.via) <= 2 then
     t.via, t.last_pos, a.path_state = nil, nil, nil

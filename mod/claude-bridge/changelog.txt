@@ -1,4 +1,17 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.6.1
+Date: 2026-11-07
+  Bugfixes:
+    - Autopilot: a stage the planner already counts as built (your own builds cover it) no longer gets asked for
+      again every few minutes; the autopilot moves on to the next stage.
+    - Autopilot: a plan near you waits at most 3 minutes, then gets built anyway (it used to wait as long as you
+      played in the middle of the base). Default keep-out radius 8 tiles, recent builds keep their ground 3 minutes.
+  Changes:
+    - New setting "Helper: fast travel" (on by default): the helper steps straight to where it works instead of
+      walking. Mining, smelting and crafting still take their real time.
+    - "Autopilot: may take apart your builds" is now on by default, so it can dismantle and rebuild to automate or
+      scale up. Plans still list what they remove, and you can reject them.
+---------------------------------------------------------------------------------------------------
 Version: 0.6.0
 Date: 2026-11-05
   Features:

@@ -108,6 +108,7 @@ class Snapshot:
     masters: dict = field(default_factory=dict)       # master id -> {"owner", "stages": [{k, label, plan, row, gate}],
     #                                                   "templates": {expansion template: stage index}}
     enemies: dict = field(default_factory=dict)       # {peaceful, spawners}
+    skipped: set = field(default_factory=set)         # stage plan ids the planner counts as built (Memory.skipped)
 
     @classmethod
     def from_observe(cls, o: dict, masters: dict | None = None, power_gaps=None) -> "Snapshot":
@@ -232,12 +233,17 @@ def adoptable_master(snap: Snapshot) -> str | None:
 
 def master_progress(snap: Snapshot, mid: str | None) -> dict:
     """{done: [k], next: stage dict or None, all_done: bool, top_started: highest stage applied or built} from the
-    plan rows of a master."""
+    plan rows of a master. A stage in snap.skipped counts as built: the planner found it on the map (the player's own
+    builds cover it) although the mod never applied its plan."""
     m = snap.masters.get(mid or "") or {}
     stages = m.get("stages") or []
-    done = [s["k"] for s in stages if (s.get("row") or {}).get("built")]
-    nxt = next((s for s in stages if not (s.get("row") or {}).get("built")), None)
-    started = [s["k"] for s in stages if (s.get("row") or {}).get("built") or
+
+    def built(s):
+        return (s.get("row") or {}).get("built") or s.get("plan") in snap.skipped
+
+    done = [s["k"] for s in stages if built(s)]
+    nxt = next((s for s in stages if not built(s)), None)
+    started = [s["k"] for s in stages if built(s) or
                (s.get("row") or {}).get("status") in ("applied", "applying")]
     return {"done": done, "next": nxt, "all_done": bool(stages) and nxt is None, "stages": stages,
             "top_started": max(started) if started else -1, "top_done": max(done) if done else -1}
@@ -378,6 +384,7 @@ class Memory:
     goal_hits: dict = field(default_factory=dict)     # goal id -> observations in a row at its target
     need_power: bool = False                          # VERIFY found machines without power: grow power first
     failed: dict = field(default_factory=dict)        # expansion template -> last error
+    skipped: set = field(default_factory=set)         # stage plan ids the planner reports built (see master_progress)
 
     def ready(self, key: str, now: float) -> bool:
         return self.cooldown.get(key, -1e9) <= now
