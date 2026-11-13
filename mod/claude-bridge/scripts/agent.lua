@@ -536,11 +536,38 @@ local function find_mine_target(a, t)
 end
 
 -- {type="mine", x?,y?, name?, entity_type?, count=1}
+-- plates of `plate` in chests and furnace outputs within 150 tiles: at least `need`?
+local PLATE_OF = {["iron-ore"] = "iron-plate", ["copper-ore"] = "copper-plate"}
+local function plates_near(c, plate, need)
+  local n = 0
+  for _, e in pairs(c.surface.find_entities_filtered{position = c.position, radius = 150,
+      type = {"container", "furnace"}, force = c.force}) do
+    local inv = e.type == "furnace" and e.get_output_inventory() or e.get_inventory(defines.inventory.chest)
+    if inv then n = n + inv.get_item_count(plate) end
+    if n >= need then return true end
+  end
+  return false
+end
+
 function tasks.mine(a, t)
   local c = a.entity
   t.count = t.count or 1
   t.done_n = t.done_n or 0
   if t.done_n >= t.count then return "done" end
+  -- ore mined by hand for plates (a gathering plan made while the chests were empty): plates have come in since
+  -- (live run: the helper hand-mined 283 iron ore for S4 while S4's own electric drills filled 9 chests with ~700
+  -- plates). Drop the rest of the gathering and let the build re-plan from the chests (at most every 2 minutes).
+  local plate = t.soft and t.name and PLATE_OF[t.name]
+  if plate and t.done_n == 0 and game.tick - (a.mine_replan or -1e9) > 7200 and
+      plates_near(c, plate, math.max(50, t.count - t.done_n)) then
+    a.mine_replan = game.tick
+    local q = a.queue or {}
+    while q[1] and q[1].type ~= "build_ghosts" and q[1].type ~= "acquire" and q[1].type ~= "dismantle" do
+      table.remove(q, 1)
+    end
+    alog(a, "plates came in: " .. plate .. " from the chests instead of mining " .. t.name)
+    return "done"
+  end
   local target = t.target
   if not (target and target.valid) then
     target = find_mine_target(a, t)
@@ -2324,7 +2351,20 @@ function tasks.dismantle(a, t)
   -- poles) still stand unbuilt (round 2 run: S4's burner drills went before its two new steam units, and the 30
   -- electric drills that replaced them ran on one boiler)
   -- (it waits as long as each build round still places something; two rounds in a row without progress and it goes on)
-  if not t.started and (t.waits or 0) < 2 and p.bbox then
+  -- (only machines wait: chests and belts that a stage retires go right away, their replacements are built over them -
+  -- live run: S3's four plate chests stood while the helper hand-mined iron for the labs, so no copper reached the belt)
+  local swap = false
+  if not t.started then
+    for _, row in pairs(p.removing) do
+      local e = row.entity
+      if e and e.valid and e.type ~= "container" and e.type ~= "transport-belt" and e.type ~= "underground-belt"
+          and e.type ~= "splitter" then
+        swap = true
+        break
+      end
+    end
+  end
+  if swap and (t.waits or 0) < 2 and p.bbox then
     local bb = p.bbox
     local left = 0
     for _, g in pairs(c.surface.find_entities_filtered{area = {{bb[1] - 1, bb[2] - 1}, {bb[3] + 1, bb[4] + 1}},
@@ -2615,7 +2655,22 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id, opts)
     end
     pl.takes_done = true
   end
+  -- a stage that only retires chests and belts (S3's plate chests become the science belt): take them out first,
+  -- nothing stops while they go and what replaces them can't be built over them
+  local retire_only = dismantle
   if dismantle then
+    for _, rm in ipairs(pl.removes or {}) do
+      local proto = prototypes.entity[rm[1]]
+      local ty = proto and proto.type
+      if ty ~= "container" and ty ~= "transport-belt" and ty ~= "underground-belt" and ty ~= "splitter" then
+        retire_only = false
+        break
+      end
+    end
+  end
+  if retire_only then
+    list[#list + 1] = {type = "dismantle", plan = plan_id}
+  elseif dismantle then
     -- in-place swaps (burner drill -> electric drill, burner inserter -> inserter): get the replacements FIRST, while
     -- the old machines still run (round-1 finding: taking the copper burner drills apart before the electric drills
     -- were made stopped all copper, and the circuits for those drills then had to be hand-mined and hand-smelted)

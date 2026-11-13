@@ -768,6 +768,7 @@ class Autopilot:
                 mp = M.MasterPlan.load(path)
                 tpl_of = {v: k for k, v in E.STAGE_KEYS.items()}
                 stages = [{"k": s.index, "label": M.slabel(s.index), "plan": M.plan_id(mp, s.index), "gate": s.gate,
+                           "key": s.key,
                            "template": tpl_of.get(s.key.rsplit("_", 1)[0] if s.key.count("_") > 1 else s.key)
                            or tpl_of.get(s.key)} for s in mp.stages]
                 rates = {}

@@ -27,6 +27,7 @@ from .grid import BLOCKED, CLEARABLE, Grid
 FLUID_RESOURCES = {"crude-oil", "sulfuric-acid-geyser", "fluorine-vent", "lithium-brine"}
 FLUID_GAP = 12
 CLEARABLE_KINDS = {"tree", "rock"}  # obstacles that deconstruction can remove (cliffs need explosives)
+LOOSE_ITEMS = {"item-on-ground", "item-request-proxy"}   # never obstacles (live run: 2 plates stopped S4)
 
 # Offshore pump rule, verified in 2.1.23 with can_place_entity(manual) on a random land/water pattern: the pump's own
 # tile is not water, and the 3-wide x 2-deep block in front of it (in its facing direction) is all water.
@@ -159,6 +160,8 @@ class World:
             obs = world._chunk_obs.setdefault((cx, cy), [])
             for row in d.get("obstacles") or ():
                 kind, name, x, y = row[:4]
+                if name in LOOSE_ITEMS:
+                    continue     # plates dropped on the ground: building over them picks them up
                 orient = row[4] if len(row) > 4 and row[4] != "" else None
                 obs.append(len(world.obstacles))
                 tiles = [tuple(t) for t in row[6]] if len(row) > 6 and row[6] else None

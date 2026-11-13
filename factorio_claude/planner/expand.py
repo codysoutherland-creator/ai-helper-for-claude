@@ -40,18 +40,23 @@ MARGIN = 72                     # tiles around the master the expansion may use
 TAP_TRIES = 30                  # tap candidates routed per input before the next block spot is tried
 SPOT_TRIES = 6                  # block spots tried per template
 GAP = 2                         # free tiles kept around a new block (walkway; doctrine ORG-3 wants >= 3 between blocks)
-TEMPLATES = ("mall", "power_grow", "steel", "science", "oil", "oil_plant")
+TEMPLATES = ("mall", "power_grow", "steel", "science", "oil", "oil_plant", "iron_grow", "copper_grow")
 STAGE_KEYS = {"mall": "x_mall", "power_grow": "x_power", "steel": "x_steel", "science": "x_science", "oil": "x_oil",
-              "oil_plant": "x_oilplant"}
+              "oil_plant": "x_oilplant", "iron_grow": "x_iron", "copper_grow": "x_copper"}
 TITLES = {"mall": "Mall (belts, inserters, drills, assemblers from assemblers)", "power_grow": "More steam power",
           "steel": "Steel smelting on the plate bus",
           "science": "Second red + green science block (+30/min each) and more iron",
-          "oil": "Pumpjacks on crude oil", "oil_plant": "Oil refinery and plastic"}
+          "oil": "Pumpjacks on crude oil", "oil_plant": "Oil refinery and plastic",
+          "iron_grow": "More iron: a smelting cell onto the plate bus",
+          "copper_grow": "More copper: a smelting cell onto the plate bus"}
 GATES = {"mall": ["automation", "electric-mining-drill", "logistics"], "power_grow": [], "steel": ["steel-processing"],
          "science": ["logistic-science-pack", "logistics"], "oil": ["oil-gathering", "fluid-handling"],
-         "oil_plant": ["oil-processing", "plastics"]}
+         "oil_plant": ["oil-processing", "plastics"], "iron_grow": ["electric-mining-drill"],
+         "copper_grow": ["electric-mining-drill"]}
+GROW = {"iron_grow": "iron-ore", "copper_grow": "copper-ore"}   # repeatable: the autopilot adds one per plate shortfall
+REPEATABLE = ("power_grow",) + tuple(GROW)
 WIDE_MARGIN = 150               # steel / science may lay the bus and put its smelting cells on a farther patch
-WIDE_TEMPLATES = ("steel", "science", "oil", "oil_plant")
+WIDE_TEMPLATES = ("steel", "science", "oil", "oil_plant", "iron_grow", "copper_grow")
 
 
 class ExpandError(RuntimeError):
@@ -1336,8 +1341,41 @@ def _oil_plant(mp, world, gd, ctx: _Ctx, k, researched):
     raise ExpandError("oil plant: " + ("; ".join(reasons[:3]) or "no free ground near the coal belts"))
 
 
+def _grow(ore):
+    def design(mp, world, gd, ctx: _Ctx, k, researched):
+        """One more smelting cell for `ore` (CELL: 12 drills / 6 furnace pairs for iron, ~225 plates/min) whose plates
+        side-load onto the plate bus's belt of that metal near its head; with no bus yet, the bus itself (it comes
+        with a cell per metal). The autopilot adds one when its rate check finds that plate the bottleneck."""
+        plate = ore.replace("-ore", "-plate")
+        alive = [e for e in mp.ents if M.alive(e, k)]
+        items_at = belt_items(alive, gd, M.world_without_master(world, mp, k))
+        hub = mp.hub or (sum(e.x for e in alive) / len(alive), sum(e.y for e in alive) / len(alive))
+        bus_ents = _bus_ents(mp)
+        if not bus_ents:
+            _b, cells, zones, _got = _new_bus(mp, world, gd, ctx, hub, items_at)
+            return {"ents": list(ctx.new), "zone": zones, "feeds": cells, "chests": [], "new_bus": True}
+        rows = sorted([e for e in bus_ents if _x(e).get("item") == plate and _x(e).get("role") == "bus"
+                       and e.name == "transport-belt"], key=lambda e: _x(e).get("row", 0))
+        if not rows:
+            raise ExpandError(f"{plate}: the bus has no {plate} belt")
+        reasons = []
+        for t in rows[3:12:2] or rows[:1]:          # near the head, upstream of every tap
+            goal = Port("belt_in", plate, math.floor(t.x), math.floor(t.y), int(t.direction or 0))
+            _bus_rows(ctx, bus_ents, release=True)
+            try:
+                got = _cell(ctx, items_at, ore, (goal.x, goal.y), goal, max_plate=CELL_FEED_MAX * 2)
+            finally:
+                _bus_rows(ctx, bus_ents, release=False)
+            if got is not None:
+                ents, info = got
+                return {"ents": list(ctx.new), "zone": info.get("zones"), "feeds": [info], "chests": []}
+            reasons.append(f"bus row {_x(t).get('row', 0)}: no {ore} patch with room within reach")
+        raise ExpandError(f"{plate}: " + "; ".join(reasons[:3]))
+    return design
+
+
 DESIGN = {"mall": _mall, "power_grow": _power_grow, "steel": _steel, "science": _science, "oil": _oil,
-          "oil_plant": _oil_plant}
+          "oil_plant": _oil_plant, "iron_grow": _grow("iron-ore"), "copper_grow": _grow("copper-ore")}
 
 
 def extend(mp, world, gd, template, *, after=None, keepout=(), researched=None, validate=True) -> dict:
@@ -1346,7 +1384,7 @@ def extend(mp, world, gd, template, *, after=None, keepout=(), researched=None, 
     stages are not built yet). Raises ExpandError (the master unchanged) when the template does not fit."""
     if template not in DESIGN:
         raise ExpandError(f"unknown expansion template {template!r}")
-    if template in templates_built(mp) and template != "power_grow":
+    if template in templates_built(mp) and template not in REPEATABLE:
         raise ExpandError(f"{template}: this master has it already")
     if template == "power_grow" and after is not None:
         # the power block's units are chained (water and coal pass through the boilers before them): new units come
@@ -1382,6 +1420,8 @@ def extend(mp, world, gd, template, *, after=None, keepout=(), researched=None, 
                        "instead of hand-crafting them",
                "power_grow": f"{2 * len(info.get('units') or [])} more steam engines "
                              f"({0.9 * 2 * len(info.get('units') or []):.1f} MW)",
+               "iron_grow": "about 225 more iron plates per minute onto the bus",
+               "copper_grow": "about 75 more copper plates per minute onto the bus",
                "steel": "steel plates for medium poles, steel furnaces and assembling machines 2",
                "science": "30 more red and 30 more green science packs per minute into 10 more labs",
                "oil": "crude oil pumped: that finishes Oil processing (refinery and chemical plant recipes)",

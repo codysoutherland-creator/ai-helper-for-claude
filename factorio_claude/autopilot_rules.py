@@ -38,12 +38,19 @@ THREAT_EVERY_MIN = 10.0         # nests the pollution reaches are re-read this o
 RED = "automation-science-pack"
 # roadmap template -> planner/expand.py template (the others are the starter base's or research's)
 EXPAND = {"mall": "mall", "power_grow": "power_grow", "steel_column": "steel", "science_block": "science",
-          "oil": "oil", "oil_plant": "oil_plant"}
+          "oil": "oil", "oil_plant": "oil_plant", "iron_grow": "iron_grow", "copper_grow": "copper_grow"}
 # research an expansion template waits for (the mall's cells and machines include electric drills: round 3 moved the
 # mall up to the electric-drill stage, so its research is a gate)
 EXPAND_GATE = {"mall": ["automation", "electric-mining-drill", "logistics"], "power_grow": [], "steel": ["steel-processing"],
                "science": ["logistic-science-pack", "logistics"], "oil": ["oil-gathering", "fluid-handling"],
-               "oil_plant": ["oil-processing", "plastics"]}
+               "oil_plant": ["oil-processing", "plastics"], "iron_grow": ["electric-mining-drill"],
+               "copper_grow": ["electric-mining-drill"]}
+# plates per science pack (red: 1 copper + a gear; green: an inserter + a belt) - what a pack rate asks of the smelting
+PLATES_PER = {"automation-science-pack": {"iron-plate": 2.0, "copper-plate": 1.0},
+              "logistic-science-pack": {"iron-plate": 5.5, "copper-plate": 1.5}}
+TIGHT = 0.85                    # a plate used at >= 85% of what is made: nothing left over, the chain waits on it
+SLACK = 0.5                     # a plate used at < 50% of what is made: over-produced (it backs up; nothing breaks)
+GROW_COOLDOWN_MIN = 20.0        # one more smelting cell per plate per 20 game minutes
 SHIPPED_ROUND = 3               # roadmap goals of rounds <= this have a template the autopilot can build
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
@@ -97,6 +104,7 @@ class Snapshot:
     paused: bool = False
     research: dict = field(default_factory=dict)      # current, progress, queue [], done set, units_done
     made: dict = field(default_factory=dict)          # items/min over 10 game minutes
+    used: dict = field(default_factory=dict)          # items/min consumed over 10 game minutes (machines + hand crafts)
     totals: dict = field(default_factory=dict)        # items made so far (packs, plates)
     power: dict = field(default_factory=dict)
     power_gaps: list = field(default_factory=list)
@@ -126,6 +134,7 @@ class Snapshot:
         return cls(tick=int(o.get("tick") or 0), speed=float(o.get("speed") or 1), on=bool(ap.get("on")),
                    epoch=int(ap.get("epoch") or 0), paused=bool(ap.get("paused")), research=research,
                    made={k: float(v) for k, v in as_dict(o.get("made")).items() if safe_name(k)},
+                   used={k: float(v) for k, v in as_dict(o.get("used")).items() if safe_name(k)},
                    totals={k: float(v) for k, v in as_dict(o.get("totals")).items() if safe_name(k)},
                    power=as_dict(o.get("power")), power_gaps=as_list(power_gaps if power_gaps is not None else []),
                    burners_out=int(o.get("burners_out") or 0), burners_out_at=as_list(o.get("burners_out_at")),
@@ -393,6 +402,7 @@ class Memory:
     latched: set = field(default_factory=set)         # goals done once (they stay done)
     goal_hits: dict = field(default_factory=dict)     # goal id -> observations in a row at its target
     need_power: bool = False                          # VERIFY found machines without power: grow power first
+    need_plate: str | None = None                     # VERIFY found this plate the bottleneck: one more smelting cell
     failed: dict = field(default_factory=dict)        # expansion template -> last error
     skipped: set = field(default_factory=set)         # stage plan ids the planner reports built (see master_progress)
 
@@ -632,7 +642,7 @@ class Director:
                 continue
             mem.built_at.setdefault(pid, snap.minute)
             prev = mem.verified.get(pid)
-            if prev is not None and (prev.get("ok") or prev.get("n", 1) >= 2 or
+            if prev is not None and (prev.get("ok") or (prev.get("n", 1) >= 2 and not str(prev.get("fix") or "").startswith("more_")) or
                                      snap.minute - prev.get("at", 0) < REVERIFY_MIN):
                 continue
             if snap.minute - mem.built_at[pid] < VERIFY_AFTER_MIN:
@@ -645,7 +655,14 @@ class Director:
                     short[item] = [round(snap.made.get(item, 0), 1), round(rate, 1)]
             cause = diagnose(snap) if short else None
             fix = None
-            if short and cause in ("full_output",):
+            neck = bottleneck(snap, short, want) if short else None
+            if neck and cause not in ("no_fuel", "no_power", "low_power"):
+                # the chain waits on a plate: every plate made is used (or fewer are made than the target asks).
+                # A full furnace somewhere else is not the reason (live run: S3 made 8 of 13.5 red/min, R7 blamed a
+                # full copper furnace and called it surplus while the red assemblers waited for iron)
+                cause, fix = f"{neck}_short", "more_" + neck.split("-")[0]
+                mem.need_plate = neck
+            elif short and cause in ("full_output",):
                 fix = "surplus"                # made less because nothing takes more: headroom, not a fault
             elif short and cause == "no_fuel":
                 fix = "fuel_round"
@@ -657,7 +674,8 @@ class Director:
             ok = not short or fix == "surplus"
             mem.verified[pid] = {"ok": ok, "short": short, "at": snap.minute, "n": (prev or {}).get("n", 0) + 1,
                                  "fix": fix}
-            args = {"plan": pid, "ok": ok, "short": short, "cause": cause, "fix": fix, "bbox": p.get("bbox")}
+            args = {"plan": pid, "ok": ok, "short": short, "cause": cause, "fix": fix, "bbox": p.get("bbox"),
+                    "balance": material_balance(snap, want)}
             if fix == "fuel_round":
                 return Action("fuel_round", "R7", goal and goal["id"], f"{pid} short of fuel", args,
                               "refuel " + pid)
@@ -682,6 +700,18 @@ class Director:
         cap = float(snap.power.get("capacity_kw") or 0)
         if snap.low_power() > LOW_POWER_MACHINES or (cap > 0 and snap.use_kw() >= POWER_TIGHT * cap):
             mem.need_power = True
+        tpl = self.grow_template(snap, mem, mp)
+        if tpl:
+            key = f"expand:{tpl}"
+            n = mem.bump(key)
+            mem.hold(key, snap.minute, GROW_COOLDOWN_MIN)
+            plate = mem.need_plate
+            mem.need_plate = None
+            b = material_balance(snap).get(plate) or {}
+            return Action("expand", "R8", goal and goal["id"],
+                          f"{plate} is the bottleneck ({b.get('made', 0):.0f}/min made, {b.get('used', 0):.0f} used): "
+                          f"one more smelting cell", {"master": mid, "template": tpl, "after": mp["top_started"],
+                                                      "attempt": n}, f"more {plate.split('-')[0]}")
         for gid in order:
             g = by[gid]
             tpl = next_template(snap, g, have, mp, mem)
@@ -708,6 +738,27 @@ class Director:
                 return Action("plateau", "R8", goal and goal["id"], "every shipped goal is done; research continues",
                               {}, "research")
         return None
+
+    def grow_template(self, snap, mem, mp) -> str | None:
+        """iron_grow / copper_grow when VERIFY found that plate the bottleneck, it is still used up (TIGHT) and the
+        starter base's own mining upgrade (the electric drills) is built: before it, that stage is the fix."""
+        plate = mem.need_plate
+        if not plate:
+            return None
+        tpl = f"{plate.split('-')[0]}_grow"
+        if any(not snap.done(t) for t in EXPAND_GATE.get(tpl, [])):
+            return None
+        if any(s.get("key") == "electric" and not (s.get("row") or {}).get("built") for s in mp["stages"]):
+            return None                  # S4's electric drills come first (they are the bigger step)
+        if any(s.get("template") == tpl and not (s.get("row") or {}).get("built") for s in mp["stages"]):
+            return None                  # the last cell is still being built
+        b = material_balance(snap).get(plate) or {}
+        if not b.get("tight"):
+            mem.need_plate = None        # the shortfall is gone
+            return None
+        if not mem.ready(f"expand:{tpl}", snap.minute):
+            return None
+        return tpl
 
     # R10: defence. Not in a peaceful game. An attack in the last DEFEND_WINDOW_MIN with no turret near it: research gun
     # turrets first (in front of the queue), then place a turret group facing the attack. Without attacks, a nest the
@@ -819,13 +870,47 @@ def safe_text(v, n=60) -> str | None:
     return " ".join(s.split())[:n]
 
 
+def material_balance(snap: Snapshot, want: dict | None = None) -> dict:
+    """{plate: {made, used, need, tight, slack}} per minute over 10 game minutes. need: the plates the targets in
+    `want` ask for (PLATES_PER of their pack rates, or a plate target itself). tight: everything made is used (the
+    chain waits on it); slack: well over half of it is left over."""
+    want = want or {}
+    out = {}
+    for plate in ("iron-plate", "copper-plate"):
+        made, used = float(snap.made.get(plate, 0)), float(snap.used.get(plate, 0))
+        need = sum(float(r) * PLATES_PER.get(i, {}).get(plate, 0) for i, r in want.items())
+        if not any(i in PLATES_PER for i in want):
+            need = float(want.get(plate, 0))
+        tight = made > 0 and used >= TIGHT * made     # (fewer made than needed with plenty left over: nothing takes it)
+        out[plate] = {"made": round(made, 1), "used": round(used, 1), "need": round(need, 1), "tight": bool(tight),
+                      "slack": bool(made > 0 and used < SLACK * made)}
+    return out
+
+
+def bottleneck(snap: Snapshot, short: dict, want: dict | None = None) -> str | None:
+    """The plate a shortfall comes from, or None: a short plate itself, or for short science the plate its packs
+    need that is used up (the one with the least left over first)."""
+    bal = material_balance(snap, {i: r for i, r in (want or {}).items() if i in short})
+    cands = []
+    for item in short:
+        if item in bal and bal[item]["tight"]:
+            cands.append(item)
+        for plate in PLATES_PER.get(item, {}):
+            if bal[plate]["tight"]:
+                cands.append(plate)
+    if not cands:
+        return None
+    return min(cands, key=lambda p: (bal[p]["made"] - bal[p]["used"]) / max(bal[p]["made"], 1.0))
+
+
 def diagnose(snap: Snapshot) -> str:
     """Known causes of a shortfall, from the problem groups: no_fuel / no_power / output_full / no_input."""
     counts = {}
     for g in as_list(snap.problems.get("groups")):
         g = as_dict(g)
         counts[str(g.get("status"))] = counts.get(str(g.get("status")), 0) + int(g.get("count") or 0)
-    for cause in ("no_fuel", "no_power", "low_power", "full_output", "no_ingredients", "no_input_fluid",
+    for cause in ("no_fuel", "no_power", "low_power", "item_ingredient_shortage", "no_ingredients", "full_output",
+                  "no_input_fluid",
                   "waiting_for_source_items", "no_minable_resources"):
         if counts.get(cause):
             return cause

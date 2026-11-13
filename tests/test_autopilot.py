@@ -746,3 +746,41 @@ def test_defense_quiet_in_a_peaceful_game_and_for_covered_or_old_attacks():
     snap = _defense_snap(attacks=[{"x": 1, "y": 1, "age_s": 60, "turrets_near": 3},
                                   {"x": 9, "y": 9, "age_s": 99999, "turrets_near": 0}])
     assert R.Director().r10_defense(snap, R.Memory(), None).kind == "defend_threats"
+
+
+def test_r7_finds_the_plate_bottleneck_behind_short_science():
+    # live run: S3 made 8 of 13.5 red/min; a full copper furnace was blamed ("surplus") while the red assemblers
+    # waited for iron (60 iron made, 54 used, copper 60 made, 21 used)
+    d = R.Director(stage_rates={"m-s3": {"iron-plate": 60, "copper-plate": 60, RED: 13.5}})
+    plans = [{"id": "m-s3", "owner": "autopilot", "status": "applied", "built": True, "ghosts": 0,
+              "bbox": [0, 0, 20, 20]}]
+    m = R.Memory()
+    d.r7_verify(snap(plans=plans, tick=36000), m, None)
+    s = snap(plans=plans, tick=36000 + 6 * 3600, made={"iron-plate": 60.2, "copper-plate": 59.5, RED: 8.0})
+    s.used = {"iron-plate": 53.6, "copper-plate": 21.2}
+    s.problems = {"groups": [{"status": "full_output", "count": 1},
+                             {"status": "item_ingredient_shortage", "count": 2}]}
+    a = d.r7_verify(s, m, None)
+    assert a.args["cause"] == "iron-plate_short" and a.args["fix"] == "more_iron" and not a.args["ok"]
+    assert m.need_plate == "iron-plate"
+    bal = a.args["balance"]
+    assert bal["iron-plate"]["tight"] and bal["copper-plate"]["slack"]
+
+
+def test_r8_grows_the_short_plate_after_the_electric_drills():
+    d = R.Director()
+    m = R.Memory(need_plate="iron-plate")
+    s = snap(made={"iron-plate": 400}, tick=120 * 3600)
+    s.used = {"iron-plate": 390}
+    s.research["done"] |= {"electric-mining-drill"}
+    st = lambda key, built, tpl=None: {"k": 4, "key": key, "template": tpl, "plan": "m-s4",
+                                       "row": {"built": built}}
+    mp = {"stages": [st("electric", False)]}
+    assert d.grow_template(s, m, mp) is None            # S4's drills first
+    mp = {"stages": [st("electric", True)]}
+    assert d.grow_template(s, m, mp) == "iron_grow"
+    mp = {"stages": [st("electric", True), st("x_iron", False, "iron_grow")]}
+    assert d.grow_template(s, m, mp) is None            # the last cell is still being built
+    s.used = {"iron-plate": 100}
+    mp = {"stages": [st("electric", True)]}
+    assert d.grow_template(s, m, mp) is None and m.need_plate is None    # not short any more

@@ -156,7 +156,7 @@ local function export_chunk(surface, force, cx, cy, inc)
         if t == "resource" then
           if inc.resources then res[#res + 1] = {e.name, p.x, p.y, e.amount} end
         elseif fname == "neutral" or fname == "enemy" then
-          if inc.obstacles and blocks_building(e) then
+          if inc.obstacles and t ~= "item-entity" and blocks_building(e) then
             local kind = KIND[t] or (fname == "enemy" and "enemy" or "other_neutral")
             local orient = (t == "cliff") and e.cliff_orientation or ""
             local box = tile_box(e)

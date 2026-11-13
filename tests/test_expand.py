@@ -304,3 +304,32 @@ def test_urgent_power_follows_the_power_blocks_own_units():
     info = X.extend(mp, w, gd, "power_grow", after=2)       # S4 and S5 add boilers: after them
     assert info["stage"] == 6.0
     assert not M.check_monotone(mp, gd) and M.validate_stage(mp, gd, w, 6.0).ok
+
+
+@pytest.mark.parametrize("seed,variant", [(3003, "onsite")])     # 2002: no free iron patch near its bus
+def test_iron_grow_adds_a_cell_onto_the_bus_and_repeats(seed, variant):
+    """iron_grow (the autopilot's answer to an iron bottleneck): a smelting cell whose plates side-load onto the
+    bus's iron belt; repeatable (a second one finds another patch or spot); with no bus yet, it lays the bus."""
+    w, gd, mp = setup(seed, variant)
+    X.extend(mp, w, gd, "steel")                             # lays the bus
+    n_bus = len(_bus(mp))
+    info = X.extend(mp, w, gd, "iron_grow")
+    k = info["stage"]
+    new = _stage(mp, k)
+    assert len(_bus(mp)) == n_bus                            # onto the existing bus, no new one
+    assert sum(1 for e in new if e.name == "electric-mining-drill") >= 4
+    assert sum(1 for e in new if e.name == "stone-furnace") >= 4
+    assert [f["item"] for f in info["feeds"]] == ["iron-plate"]
+    assert not M.check_monotone(mp, gd) and M.validate_stage(mp, gd, w, k).ok
+    assert "iron_grow" in X.templates_built(mp)
+    try:
+        k2 = X.extend(mp, w, gd, "iron_grow")["stage"]       # repeatable when there is room
+        assert k2 > k and M.validate_stage(mp, gd, w, k2).ok
+    except X.ExpandError:
+        pass                                                 # no second patch in reach is a fair answer
+
+
+def test_grow_without_a_bus_lays_one():
+    w, gd, mp = setup(2002, "hub")
+    info = X.extend(mp, w, gd, "copper_grow")
+    assert _bus(mp) and M.validate_stage(mp, gd, w, info["stage"]).ok
