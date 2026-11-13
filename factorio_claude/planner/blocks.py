@@ -1165,8 +1165,11 @@ def _green_part(G, S, y0, Yg, belt="transport-belt"):
 # took 250 circuits and 200 belts to fill its chest while inserters ran short); the circuit users are the inserter
 # group (long-handed and fast inserters by direct insertion from the inserter machine, downstream of it), then drills
 # and assemblers. The belt machine has two input and two output inserters (~100 belts/min, its own two chests).
+# Defence v2: firearm magazines (4 iron plates, belt A's north lane) in the last slot once Gun turrets is researched,
+# so rearming takes from the mall instead of hand-crafting 25 magazines per turret (appended: the slots before it keep
+# their place, so a mall built without it gets it later in its reserved room - expand.py mall_add)
 MALL_SLOTS = ("transport-belt", "underground-belt", "long-handed-inserter", "inserter", "fast-inserter",
-              "electric-mining-drill", "assembling-machine-1", "pipe", "steam-engine", "iron-chest")
+              "electric-mining-drill", "assembling-machine-1", "pipe", "steam-engine", "iron-chest", "firearm-magazine")
 MALL_DOUBLE = ("transport-belt",)      # a second input (plates and gears) and a second output into a second chest
 # circuit users with a second belt-A input (smoke runs: one inserter's ~0.83 items/s of iron and gears held the
 # assembler machine to ~3.5 assemblers/min and the inserter machine to ~25 inserters/min; both ran short)
@@ -1180,11 +1183,14 @@ MALL_INPUTS = {"inserter": (True, None, 0), "splitter": (True, "transport-belt",
                "pipe": (False, None, 0), "steam-engine": (False, "pipe", -1),
                "electric-mining-drill": (True, None, 0), "assembling-machine-1": (True, None, 0),
                "burner-inserter": (False, None, 0), "long-handed-inserter": (False, "inserter", -1),
-               "fast-inserter": (True, "inserter", 1), "iron-chest": (False, None, 0)}
+               "fast-inserter": (True, "inserter", 1), "iron-chest": (False, None, 0),
+               "firearm-magazine": (False, None, 0)}
 MALL_STACKS = {"electric-mining-drill": 1, "assembling-machine-1": 1, "steam-engine": 1, "underground-belt": 1,
-               "splitter": 1, "fast-inserter": 1, "long-handed-inserter": 1, "iron-chest": 1, "transport-belt": 4}
+               "splitter": 1, "fast-inserter": 1, "long-handed-inserter": 1, "iron-chest": 1, "transport-belt": 4,
+               "firearm-magazine": 1}      # 200 magazines: 8 turrets at 25 (800 iron plates, not more)
 #   (belts: the helper's biggest need by far - 1,650+ per 3 game hours - so their chest holds 400)
-MALL_GATE = {"splitter": "logistics", "underground-belt": "logistics", "fast-inserter": "fast-inserter"}
+MALL_GATE = {"splitter": "logistics", "underground-belt": "logistics", "fast-inserter": "fast-inserter",
+             "firearm-magazine": "gun-turret"}     # (its recipe is enabled from the start: no turrets, no use)
 
 
 def mall_block(gd=None, items=None, *, extra_slots=2, chest="iron-chest", belt="transport-belt",
@@ -1338,4 +1344,375 @@ def oil_plant_block(gd=None, *, chest="iron-chest", belt="transport-belt") -> Bl
     b.info = {"chests": [(4.5, 3.5, "plastic-bar")], "reserve": [("oil_plant", (0, 0, 9, 12))]}
     b.rates = {"plastic-bar": 54.0, "coal": -27.0, "crude-oil": -1200.0,
                "power_kw": round(420 + 210 + 2 * 13.2, 1)}
+    return _finish(b, gd)
+
+
+# ---- autopilot round 4: blue science (roadmap G10) --------------------------------------------------------------------
+# One row of machines (pitch 4, a gap column between neighbours for direct insertion) between two belt pairs, with the
+# chemical science machines on a short row above. Canonical, north up (x from the west):
+#   row 0      blue belt (flowing WEST) -> port belt_out (3, 0): the packs go to the labs (expand.py lab feed)
+#   row 1      chem pack output inserters          rows 2-4  BLUE_CHEM chemical science machines (x 4 + 4j)
+#   row 5      chem pack inputs: an inserter from belt Z, a long-handed one from belt W
+#   row 6      belt Z (WEST): engines, on its north lane only (long-handed inserters from row 8 reach over W)
+#   row 7      belt W (WEST): advanced circuits on its north lane (inserters from row 8), sulfur on its south lane (the
+#              chemical plant's inserter drops from row 6, east of where Z starts): separate lanes, no deadlock
+#   row 8      main row outputs                     rows 9-11  the main row, x 4 + 4i (BLUE_ROW)
+#   row 12     main row inputs: an inserter from belt A, a long-handed one from belt B
+#   row 13     belt A (EAST): iron plates on its north lane (side-loaded at x 1 from port (1, 11)), plastic on its south
+#              lane (side-loaded at x 2 from port (2, 15))
+#   row 14     belt B (EAST): copper plates under the circuit machines (from port (3, 15)), then - after a gap tile -
+#              steel plates under the engine machines (from port (43, 15))
+# The main row needs one belt item per machine, the rest comes by direct insertion from its neighbours: a cable machine
+# feeds the advanced circuit machine east of it and the green circuit machine west of it, each green circuit machine
+# feeds the advanced circuit machine west of it (C A G C A G C A G C); each engine machine sits between a gear and a pipe
+# machine (Gr E P E Gr E P). The sulfur chemical plant (rows 3-5, x 72-74) takes water and petroleum gas from the north
+# (ports pipe_in (72, 2): water, its 1st input; (74, 2): petroleum, its 2nd - the recipe's order) and drops sulfur onto
+# belt W's head. Assemblers 2 for the slow recipes (advanced circuits, engines, packs; Automation 2 comes before Fluid
+# handling), assemblers 1 for cables, green circuits, gears and pipes: ~13.5 packs/min (the engines' 13.5/min).
+# Not mirrorable (the chemical plant's inputs are not symmetric); rotations are fine.
+BLUE_ROW = ("C", "A", "G", "C", "A", "G", "C", "A", "G", "C", "Gr", "E", "P", "E", "Gr", "E", "P")
+BLUE_RECIPE = {"C": "copper-cable", "A": "advanced-circuit", "G": "electronic-circuit", "Gr": "iron-gear-wheel",
+               "P": "pipe", "E": "engine-unit"}
+BLUE_CHEM = 4
+BLUE_SLOW = ("A", "E")              # assemblers 2 (with the packs)
+BLUE_B2 = 43                        # x of the steel belt's first tile (the copper belt ends at x 41)
+BLUE_SULFUR_X = 72
+
+
+def blue_block(gd=None, *, belt="transport-belt", pole="small-electric-pole") -> Block:
+    G = _geo(gd)
+    fast = choose(gd, "assembling-machine-2", "assembling-machine-1")
+    am1, ins, lng = "assembling-machine-1", "inserter", "long-handed-inserter"
+    link = choose(gd, "fast-inserter", "inserter")       # cable -> green circuit: 45 cables/min, a basic one's limit
+    E = []
+
+    def put(name, x, y, d=NORTH, role="", recipe=None, **kw):
+        e = _put(G, name, x, y, d, recipe=recipe, extra=_r(role, **kw))
+        E.append(e)
+        return e
+    xs = [4 + 4 * i for i in range(len(BLUE_ROW))]
+    for i, (k, x0) in enumerate(zip(BLUE_ROW, xs)):
+        put(fast if k in BLUE_SLOW else am1, x0, 9, recipe=BLUE_RECIPE[k], role="blue_am", unit=k, slot=i)
+        if k in ("C", "E"):                             # copper / steel from belt B
+            put(lng, x0 + 1, 12, SOUTH, role="blue_in", unit=k, slot=i)
+        else:                                           # iron / plastic from belt A
+            put(ins, x0, 12, SOUTH, role="blue_in", unit=k, slot=i)
+        if k == "A":
+            put(ins, x0 + 1, 8, SOUTH, role="blue_out", unit=k, slot=i)      # onto W (north lane)
+        elif k == "E":
+            put(lng, x0 + 1, 8, SOUTH, role="blue_out", unit=k, slot=i)      # over W onto Z
+    for i in range(len(BLUE_ROW) - 1):                  # direct insertion through the gap column
+        a, b = BLUE_ROW[i], BLUE_ROW[i + 1]
+        g = xs[i] + 3
+        src = {("C", "A"): -1, ("A", "G"): 1, ("G", "C"): 1, ("Gr", "E"): -1, ("E", "P"): 1, ("P", "E"): -1,
+               ("E", "Gr"): 1}.get((a, b))
+        if src is None:
+            continue
+        d = EAST if src > 0 else WEST
+        put(link if (a, b) == ("G", "C") else ins, g, 10, d, role="blue_link", unit=f"{a}{b}", slot=i)
+        if (a, b) == ("G", "C"):                        # two: cables for the green circuits are the busiest link
+            put(link, g, 11, d, role="blue_link", unit=f"{a}{b}", slot=i)
+    cx = [4 + 4 * j for j in range(BLUE_CHEM)]
+    for j, x0 in enumerate(cx):
+        put(fast, x0, 2, recipe="chemical-science-pack", role="blue_chem", unit=j)
+        put(ins, x0, 5, SOUTH, role="chem_in", unit=j)          # engines from Z
+        put(lng, x0 + 1, 5, SOUTH, role="chem_in", unit=j)      # advanced circuits + sulfur from W
+        put(ins, x0 + 1, 1, SOUTH, role="chem_out", unit=j)     # packs onto the blue belt
+    put("chemical-plant", BLUE_SULFUR_X, 3, NORTH, recipe="sulfur", role="blue_sulfur")
+    put(ins, BLUE_SULFUR_X + 1, 6, NORTH, role="sulfur_out")    # drops onto W's south lane
+    # belts
+    for x in range(4, cx[-1] + 2):
+        put(belt, x, 0, WEST, role="blue_belt", row=x)
+    e_out = max(x0 + 1 for k, x0 in zip(BLUE_ROW, xs) if k == "E")
+    for x in range(4, e_out + 1):
+        put(belt, x, 6, WEST, role="belt_z", row=x)
+    for x in range(4, BLUE_SULFUR_X + 2):
+        put(belt, x, 7, WEST, role="belt_w", row=x)
+    a_end = xs[-1]                                       # the last iron user's input inserter
+    put(belt, 0, 13, EAST, role="stub", row=0)          # behind belt A's first tile: (1, 12) side-loads, not curves
+    for x in range(1, a_end + 1):
+        put(belt, x, 13, EAST, role="belt_a", row=x)
+    put(belt, 1, 12, SOUTH, role="fe_feed", row=12)     # iron onto A's north lane
+    put(belt, 2, 14, NORTH, role="pl_feed", row=14)     # plastic onto A's south lane
+    c_end = max(x0 + 1 for k, x0 in zip(BLUE_ROW, xs) if k == "C")
+    for x in range(3, c_end + 1):
+        put(belt, x, 14, EAST, role="belt_b", row=x, item="copper-plate")
+    for x in range(BLUE_B2, e_out + 1):
+        put(belt, x, 14, EAST, role="belt_b", row=x, item="steel-plate")
+    # poles: the gap columns of the input and output rows, the chem rows, the chemical plant
+    for x in [x0 - 1 for x0 in xs] + [xs[-1] + 3]:
+        put(pole, x, 12, role="blue_pole", unit=x)
+        put(pole, x, 8, role="blue_pole", unit=x)
+    for x in [x0 - 1 for x0 in cx] + [cx[-1] + 3]:
+        put(pole, x, 5, role="blue_pole", unit=x)
+        put(pole, x, 1, role="blue_pole", unit=x)
+    put(pole, BLUE_SULFUR_X - 1, 4, role="blue_pole", unit="sulfur")
+    ports = [Port("belt_in", "iron-plate", 1, 11, SOUTH), Port("belt_in", "plastic-bar", 2, 15, NORTH),
+             Port("belt_in", "copper-plate", 3, 15, NORTH), Port("belt_in", "steel-plate", BLUE_B2, 15, NORTH),
+             Port("pipe_in", "water", BLUE_SULFUR_X, 2, SOUTH),
+             Port("pipe_in", "petroleum-gas", BLUE_SULFUR_X + 2, 2, SOUTH),
+             Port("belt_out", "chemical-science-pack", 3, 0, WEST)]
+    b = Block("blue_block", E, (BLUE_SULFUR_X + 3, 15), ports)
+
+    def speed(name):
+        return float(G.entity(name).get("crafting_speed") or 0.5)
+
+    def per_min(recipe, machine, n=1):
+        r = G.raw["recipes"][recipe] if hasattr(G, "raw") and recipe in (G.raw.get("recipes") or {}) else None
+        energy = float((r or {}).get("energy") or {"engine-unit": 10, "advanced-circuit": 6,
+                                                    "chemical-science-pack": 24}.get(recipe, 1))
+        amount = float(next((p.get("amount") or 1 for p in (r or {}).get("products") or []
+                             if p.get("name") == recipe), 2 if recipe == "chemical-science-pack" else 1))
+        return n * 60.0 * amount * speed(machine) / energy
+    packs = per_min("chemical-science-pack", fast, BLUE_CHEM)
+    engines = per_min("engine-unit", fast, BLUE_ROW.count("E"))
+    adv = per_min("advanced-circuit", fast, BLUE_ROW.count("A"))
+    rate = round(min(packs, engines, adv / 1.5), 2)
+    b.info = {"chests": [], "reserve": [], "machines": BLUE_ROW, "chem": BLUE_CHEM,
+              "capacity": {"chemical-science-pack": round(packs, 2), "engine-unit": round(engines, 2),
+                           "advanced-circuit": round(adv, 2)}}
+    # per pack: an engine (a steel plate, a gear, two pipes = 4 iron), 1.5 advanced circuits (3 plastic, 6 cables,
+    # 3 green circuits = 3 iron + 7.5 copper), half a sulfur (the sulfur recipe: 30 water + 30 petroleum -> 2 sulfur,
+    # so 7.5 water + 7.5 petroleum per pack)
+    b.rates = {"chemical-science-pack": rate, "iron-plate": -7.0 * rate, "copper-plate": -7.5 * rate,
+               "steel-plate": -1.0 * rate, "plastic-bar": -3.0 * rate, "petroleum-gas": -7.5 * rate,
+               "water": -7.5 * rate,
+               "power_kw": round(sum(float(G.entity(e.name).get("max_energy_usage_kw") or 0) for e in E
+                                     if e.name in (am1, fast, "chemical-plant")), 1)}
+    return _finish(b, gd)
+
+
+# ---- autopilot round 5: the robot mall (roadmap G11) ------------------------------------------------------------------
+# One row of machines (pitch 4, a gap column between neighbours for direct insertion) between FOUR belts, all flowing
+# EAST: two north of the row, two south of it. A machine picks from the near belt with an inserter and from the far one
+# with a long-handed inserter, on either side; it drops on the FAR lane of the belt it drops on. So every belt has one
+# lane for a plate (side-loaded at the west end: the near lane of the feed) and one lane for an intermediate the row
+# makes (the far lane seen from the row), each lane one item only (no mixed-lane deadlock):
+#   row 0  N2: steel (south lane)    | flying robot frames (north lane: the frame machine's long-handed inserter)
+#   row 1  N1: iron (south lane)     | advanced circuits (north lane: the advanced circuit machines)
+#   row 2  north inserters, poles; the battery plant's acid and the electric engine machine's lubricant arrive here
+#          through pipe-to-ground pairs from the fluid section above (under N2 and N1)
+#   rows 3-5 the machines        row 6  south inserters, poles
+#   row 7  S1: copper (north lane)   | electronic circuits (south lane: the green circuit machines)
+#   row 8  S2: plastic (north lane)  | engines (south lane: the engine machine's long-handed inserter)
+# Machines west -> east: C A G C A G C (circuits, as blue_block's head), Gr E P (engines), Bat Fr EE (frames: batteries
+# and electric engines by direct insertion), CR (construction robots), St Sc Pp (storage and passive provider chests:
+# steel chests by direct insertion from the middle one), Gr Rp (roboports: gears by direct insertion), LR (logistic
+# robots). The order is the priority on the shared lanes (the first machine on a lane takes what it needs until its
+# chest and its own output slot are full): frames and construction robots first on the green circuit lane, the chests
+# before the roboports on the advanced circuit lane, logistic robots last on both (construction first; engine-checked:
+# tests/live_robots.py RB1). Products go into chests in the row (an inserter in the gap after the machine, the chest
+# next to it; role mall_chest: the helper's source like the mall's). The plates enter at the west end (ports flowing
+# east).
+# Fluid section above Bat..EE (rows -16..-1 of the design frame): an oil refinery on ADVANCED oil processing (crude +
+# water; lubricant needs heavy oil, which basic processing does not make) feeding a lubricant plant (heavy oil), a
+# sulfur plant (petroleum gas + water) that hands its sulfur to a sulfuric acid plant (iron from N1 by a long-handed
+# inserter reaching over N2, water), and storage tanks on the light oil nothing here uses and on the heavy oil the
+# lubricant plant does not keep up with taking (a frame needs ~1.1 refinery cycles of petroleum for its batteries but
+# only 0.6 of heavy oil): the refinery stops once a product backs up, so the light oil tank (25,000) is what lets it
+# run - ~550 refinery cycles, ~500 frames - before the light oil has to go somewhere (cracking is not built: see
+# AUTOPILOT.md 8.3).
+# Not mirrorable (refinery and chemical plants); rotations are fine. info["shape"]: the two rects that hold entities
+# (the empty ground above the west part of the row stays free for other blocks).
+ROBOT_ROW = ("C", "A", "G", "C", "A", "G", "C", "Gr", "E", "P")
+ROBOT_RECIPE = {"C": "copper-cable", "A": "advanced-circuit", "G": "electronic-circuit", "Gr": "iron-gear-wheel",
+                "P": "pipe", "E": "engine-unit", "Rp": "roboport", "Sc": "steel-chest", "St": "storage-chest",
+                "Pp": "passive-provider-chest", "Fr": "flying-robot-frame", "EE": "electric-engine-unit",
+                "CR": "construction-robot", "LR": "logistic-robot"}
+ROBOT_SLOW = ("A", "E", "EE", "Fr", "Rp")         # assemblers 2 (electric engines need one: crafting-with-fluid)
+ROBOT_ITEMS = ("roboport", "storage-chest", "passive-provider-chest", "construction-robot", "logistic-robot")
+ROBOT_STACKS = {"roboport": 1, "storage-chest": 1, "passive-provider-chest": 1, "construction-robot": 1,
+                "logistic-robot": 1}             # chest bars (slots): 10 roboports, 50 chests, 50 robots each
+#   (the construction robot machine is first on the frames lane: once its chest is full the logistic robots get them)
+ROBOT_LIGHT_TANK = 25000.0
+
+
+def robot_block(gd=None, *, belt="transport-belt", pole="small-electric-pole", chest="iron-chest") -> Block:
+    G = _geo(gd)
+    fast = choose(gd, "assembling-machine-2", "assembling-machine-1")
+    am1, ins, lng = "assembling-machine-1", "inserter", "long-handed-inserter"
+    link = choose(gd, "fast-inserter", "inserter")
+    E = []
+
+    def put(name, x, y, d=NORTH, role="", recipe=None, **kw):
+        e = _put(G, name, x, y, d, recipe=recipe, extra=_r(role, **kw))
+        E.append(e)
+        return e
+
+    def machine(k, x0, **kw):
+        # assemblers 2 for the slow recipes (and electric engines, a fluid recipe); the robot items are robot_am:
+        # registered as the helper's mall machines (it waits there instead of hand-crafting)
+        role = "robot_am" if ROBOT_RECIPE[k] in ROBOT_ITEMS else "robot_part"
+        return put(fast if k in ROBOT_SLOW else am1, x0, 3, recipe=ROBOT_RECIPE[k], role=role, unit=k, **kw)
+
+    def out_chest(x_ins, x_chest, d, item):
+        stack = int((G.raw.get("items") or {}).get(item, {}).get("stack_size") or 50) if hasattr(G, "raw") else 50
+        put(ins, x_ins, 4, d, role="robot_out", unit=item)
+        put(chest, x_chest, 4, role="mall_chest", unit=item, bar=ROBOT_STACKS[item], holds=ROBOT_STACKS[item] * stack)
+    poles = set()
+    # plates in at the west end, each side-loaded onto its lane (a stub belt behind the first tile of each belt)
+    put(belt, 0, 0, EAST, role="stub", row=0)                  # N2: steel from port (-1, 1)
+    put(belt, 0, 1, EAST, role="st_feed", row=1)
+    put(belt, 1, 1, NORTH, role="st_feed", row=1)
+    put(belt, 2, 1, EAST, role="stub", row=1)                  # N1: iron from port (-1, 2)
+    for x in (0, 1, 2):
+        put(belt, x, 2, EAST, role="fe_feed", row=2)
+    put(belt, 3, 2, NORTH, role="fe_feed", row=2)
+    for x in (0, 1, 2):                                        # S1: copper from port (-1, 6)
+        put(belt, x, 6, EAST, role="cu_feed", row=6)
+    put(belt, 3, 6, SOUTH, role="cu_feed", row=6)
+    put(belt, 2, 7, EAST, role="stub", row=7)
+    put(belt, 0, 7, EAST, role="pl_feed", row=7)               # S2: plastic from port (-1, 7)
+    put(belt, 1, 7, SOUTH, role="pl_feed", row=7)
+    put(belt, 0, 8, EAST, role="stub", row=8)
+    # the row
+    xs = [4 + 4 * i for i in range(len(ROBOT_ROW))]
+    for i, (k, x0) in enumerate(zip(ROBOT_ROW, xs)):
+        machine(k, x0, slot=i)
+        if k == "C":
+            put(ins, x0 + 1, 6, SOUTH, role="robot_in", unit=k)           # copper from S1
+        elif k == "A":
+            put(lng, x0 + 1, 6, SOUTH, role="robot_in", unit=k)           # plastic from S2
+            put(ins, x0 + 1, 2, SOUTH, role="robot_mid", unit=k)          # advanced circuits onto N1's north lane
+        elif k == "G":
+            put(ins, x0 + 1, 2, NORTH, role="robot_in", unit=k)           # iron from N1
+            put(ins, x0 + 1, 6, NORTH, role="robot_mid", unit=k)          # green circuits onto S1's south lane
+        elif k in ("Gr", "P"):
+            put(ins, x0 + 1, 2, NORTH, role="robot_in", unit=k)
+        elif k == "E":
+            put(lng, x0 + 1, 2, NORTH, role="robot_in", unit=k)           # steel from N2
+            put(lng, x0 + 1, 6, NORTH, role="robot_mid", unit=k)          # engines onto S2's south lane
+    for i in range(len(ROBOT_ROW) - 1):          # direct insertion through the gap column (blue_block's pairs)
+        a, b = ROBOT_ROW[i], ROBOT_ROW[i + 1]
+        g = xs[i] + 3
+        src = {("C", "A"): -1, ("A", "G"): 1, ("G", "C"): 1, ("Gr", "E"): -1, ("E", "P"): 1}.get((a, b))
+        if src is None:
+            continue
+        d = EAST if src > 0 else WEST
+        put(link if (a, b) == ("G", "C") else ins, g, 4, d, role="robot_link", unit=f"{a}{b}", slot=i)
+        if (a, b) == ("G", "C"):
+            put(link, g, 5, d, role="robot_link", unit=f"{a}{b}", slot=i)
+    poles |= {x0 - 1 for x0 in xs[1:]} | {xs[-1] + 3}       # (x 3 is the plate feeds'; x 7 powers the first slot)
+    # frames: Bat (44, a chemical plant) -> Fr (48) <- EE (52), right after the engines: first on the green circuit lane
+    # (engine check: behind the chest machines, their first 50 storage + 50 passive provider chests took 300 green
+    # circuits and no construction robot was made in 12 game minutes)
+    B0 = 44
+    put("chemical-plant", B0, 3, NORTH, recipe="battery", role="robot_part", unit="Bat")
+    put(ins, B0 + 1, 2, NORTH, role="robot_in", unit="Bat")                # iron from N1
+    put(ins, B0 + 1, 6, SOUTH, role="robot_in", unit="Bat")                # copper from S1
+    put(ins, 47, 4, WEST, role="robot_link", unit="BatFr")
+    machine("Fr", 48)
+    put(lng, 48, 2, NORTH, role="robot_in", unit="Fr")                     # steel from N2
+    put(lng, 49, 2, SOUTH, role="robot_mid", unit="Fr")                    # frames onto N2's north lane
+    put(ins, 49, 6, SOUTH, role="robot_in", unit="Fr")                     # green circuits from S1
+    put(ins, 51, 4, EAST, role="robot_link", unit="EEFr")
+    machine("EE", 52)
+    put(ins, 52, 6, SOUTH, role="robot_in", unit="EE")                     # green circuits from S1
+    put(lng, 53, 6, SOUTH, role="robot_in", unit="EE")                     # engines from S2
+    # construction robots (56) -> chest 60: first on the frames lane
+    machine("CR", 56)
+    put(lng, 57, 2, NORTH, role="robot_in", unit="CR")                     # frames from N2
+    put(ins, 57, 6, SOUTH, role="robot_in", unit="CR")                     # green circuits from S1
+    out_chest(59, 60, WEST, "construction-robot")
+    # storage / passive provider chests: chest 61 <- St (63) <- Sc (67) -> Pp (71) -> chest 75. First on the advanced
+    # circuit lane: they take one each and stop once their chest is full, the roboport machine takes 45 (engine check:
+    # placed before them, it took every circuit and the chests and logistic robots got none)
+    out_chest(62, 61, EAST, "storage-chest")
+    for k, x0 in (("St", 63), ("Pp", 71)):
+        machine(k, x0)
+        put(ins, x0 + 1, 2, NORTH, role="robot_in", unit=k)                # advanced circuits from N1
+        put(ins, x0 + 1, 6, SOUTH, role="robot_in", unit=k)                # green circuits from S1
+    machine("Sc", 67)
+    put(lng, 68, 2, NORTH, role="robot_in", unit="Sc")
+    put(ins, 66, 4, EAST, role="robot_link", unit="ScSt")
+    put(ins, 70, 4, WEST, role="robot_link", unit="ScPp")
+    out_chest(74, 75, WEST, "passive-provider-chest")
+    # roboports: Gr2 (76) -> Rp (80) -> chest 84
+    machine("Gr", 76, slot="rp")
+    put(ins, 77, 2, NORTH, role="robot_in", unit="Gr")
+    put(ins, 79, 4, WEST, role="robot_link", unit="GrRp")
+    machine("Rp", 80)
+    put(lng, 81, 2, NORTH, role="robot_in", unit="Rp")                     # steel from N2
+    put(ins, 80, 2, NORTH, role="robot_in", unit="Rp")                     # advanced circuits from N1
+    out_chest(83, 84, WEST, "roboport")
+    # logistic robots (87) -> chest 85: last on the frames lane and on the advanced circuit lane
+    out_chest(86, 85, EAST, "logistic-robot")
+    machine("LR", 87)
+    put(lng, 88, 2, NORTH, role="robot_in", unit="LR")                     # frames from N2
+    put(ins, 87, 2, NORTH, role="robot_in", unit="LR")                     # advanced circuits from N1
+    poles |= {47, 51, 55, 59, 62, 66, 70, 74, 79, 83, 86}
+    for x in sorted(poles):
+        for y in (2, 6):
+            put(pole, x, y, role="robot_pole", unit=x)
+    # belts (all east): each as far as its last consumer
+    for x in range(1, 89):
+        put(belt, x, 0, EAST, role="belt_n2", row=x)
+    for x in range(3, 88):
+        put(belt, x, 1, EAST, role="belt_n1", row=x)
+    for x in range(3, 73):
+        put(belt, x, 7, EAST, role="belt_s1", row=x)
+    for x in range(1, 54):
+        put(belt, x, 8, EAST, role="belt_s2", row=x)
+    # fluid section (rows -16..-1, x B0..B0+16): acid and lubricant down to the row through pipe-to-ground pairs
+    ptg = "pipe-to-ground"
+    for x in (B0, B0 + 9):                                                 # the battery plant's acid, EE's lubricant
+        put(ptg, x, -1, NORTH, role="robot_pipe", unit="drop")
+        put(ptg, x, 2, SOUTH, role="robot_pipe", unit="drop")
+    put("chemical-plant", B0, -5, NORTH, recipe="sulfuric-acid", role="robot_part", unit="Acid")
+    put(lng, B0 + 1, -1, SOUTH, role="robot_in", unit="Acid")              # iron from N1 (over N2)
+    put(ins, B0 + 3, -4, EAST, role="robot_link", unit="SulAcid")
+    put("chemical-plant", B0 + 4, -5, NORTH, recipe="sulfur", role="robot_part", unit="Sul")
+    put("chemical-plant", B0 + 12, -5, NORTH, recipe="lubricant", role="robot_part", unit="Lube")
+    put("storage-tank", B0 + 7, -6, EAST, role="robot_tank", unit="light-oil")
+    # heavy oil too: a refinery cycle makes 25 and a frame's electric engine takes 15 while the frame's batteries need
+    # ~1.1 cycles of petroleum, so heavy oil backs up and would stop the refinery (and with it the batteries)
+    put("storage-tank", B0 + 14, -9, SOUTH, role="robot_tank", unit="heavy-oil")
+    put("oil-refinery", B0 + 6, -13, SOUTH, recipe="advanced-oil-processing", role="robot_part", unit="Ref")
+    put(ptg, B0 + 7, -14, SOUTH, role="robot_pipe", unit="crude")          # crude in, under the water line
+    put(ptg, B0 + 7, -16, NORTH, role="robot_pipe", unit="crude")
+
+    def pipes(fluid, *tiles):
+        for x, y in tiles:
+            put("pipe", B0 + x, y, role="robot_pipe", unit=fluid)
+    pipes("sulfuric-acid", (0, -2))
+    pipes("lubricant", (12, -2), (11, -2), (10, -2), (9, -2))
+    pipes("water", (0, -6), (0, -7), (1, -7), (2, -7), (3, -7), (4, -7), (4, -6),
+          *((4, y) for y in range(-16, -7)), *((x, -15) for x in range(5, 10)), (9, -14))
+    pipes("petroleum-gas", (6, -8), (6, -7), (6, -6))
+    pipes("light-oil", (8, -8), (8, -7), (9, -7))
+    pipes("heavy-oil", (10, -8), (11, -8), (12, -8), (12, -7), (12, -6), (13, -8), (13, -9))
+    for x, y in ((3, -3), (5, -7), (5, -11), (11, -4)):
+        put(pole, B0 + x, y, role="robot_pole", unit=f"fluid{x}")
+    ports = [Port("belt_in", "iron-plate", -1, 2, EAST), Port("belt_in", "steel-plate", -1, 1, EAST),
+             Port("belt_in", "copper-plate", -1, 6, EAST), Port("belt_in", "plastic-bar", -1, 7, EAST),
+             Port("pipe_in", "water", B0 + 4, -17, SOUTH), Port("pipe_in", "crude-oil", B0 + 7, -17, SOUTH)]
+    # normalise: the top row of the fluid section is row 0
+    dy = 16
+    E = [replace(e, y=e.y + dy) for e in E]
+    ports = [replace(p, y=p.y + dy) for p in ports]
+    b = Block("robot_block", E, (90, 25), ports)
+    chests = [(e.x, e.y, e.extra["unit"]) for e in E if e.extra.get("role") == "mall_chest"]
+
+    def speed(name):
+        return float(G.entity(name).get("crafting_speed") or 0.5)
+
+    def per_min(k):
+        recipe = ROBOT_RECIPE[k]
+        r = G.raw["recipes"].get(recipe) if hasattr(G, "raw") and (G.raw.get("recipes") or {}) else None
+        energy = float((r or {}).get("energy") or {"flying-robot-frame": 20, "roboport": 5,
+                                                   "electric-engine-unit": 10}.get(recipe, 0.5))
+        return 60.0 * speed(fast if k in ROBOT_SLOW else am1) / energy
+    frames = per_min("Fr")
+    adv = 2 * per_min("A")
+    b.info = {"chests": chests, "reserve": [], "items": list(ROBOT_ITEMS),
+              "shape": [(0, dy, 90, dy + 9), (B0, 0, B0 + 17, dy)],
+              "capacity": {"flying-robot-frame": round(frames, 2), "advanced-circuit": round(adv, 2),
+                           "roboport": round(min(per_min("Rp"), adv / 45.0), 2)},
+              "light_oil_cycles": int(ROBOT_LIGHT_TANK // 45)}
+    # per frame: an electric engine (an engine - steel, gear, 2 pipes - 2 green circuits, 15 lubricant), 2 batteries
+    # (20 acid each: 0.4 sulfur cycle -> 12 petroleum + 12 water per battery, plus the acid's 40 water), 3 green
+    # circuits, a steel plate. A robot: a frame + 2 green (construction) / 2 advanced (logistic) circuits.
+    b.rates = {"flying-robot-frame": round(frames, 2), "roboport": b.info["capacity"]["roboport"],
+               "power_kw": round(sum(float(G.entity(e.name).get("max_energy_usage_kw") or 0) for e in E
+                                     if e.name in (am1, fast, "chemical-plant", "oil-refinery")), 1)}
     return _finish(b, gd)

@@ -21,6 +21,11 @@ electric-energy-interface, runs at game.speed 10 and reads the entities back:
                    the chemical plant makes plastic into the depot chest
   X5 oil_trigger   a powered pumpjack on a crude-oil well (Oil gathering researched) finishes the Oil processing
                    trigger tech
+  X6 blue          blocks.blue_block fed at its ports (plates, steel, plastic, water, petroleum): every machine crafts,
+                   belt W carries advanced circuits / sulfur on separate lanes, belt Z engines only, >= 10 chemical
+                   science packs/min once warm
+  X7 lab_chain     the blue stage's lab row: labs chained from an old lab get red, green (from it) and blue packs
+  X8 pipe_span     a straight pipe compressed into pipe-to-ground pairs (expand._ptg_compress) carries water
 """
 import argparse
 import importlib.util
@@ -59,7 +64,8 @@ def restart(slot, stop=False):
 
 
 RESEARCH = ("automation", "logistics", "steam-power", "electronics", "electric-mining-drill", "steel-processing",
-            "fast-inserter", "fluid-handling", "oil-gathering", "oil-processing", "plastics")
+            "fast-inserter", "fluid-handling", "oil-gathering", "oil-processing", "plastics", "automation-2", "engine",
+            "advanced-circuit", "sulfur-processing", "chemical-science-pack")
 
 
 def setup():
@@ -276,26 +282,158 @@ rcon.print(helpers.table_to_json({{researched = f.technologies["oil-processing"]
     return errs, m
 
 
+def case_blue(gd, X, Y):
+    """X6: blocks.blue_block fed at its ports (plates, steel and plastic on reservoir belts, water and petroleum from
+    infinity pipes), the blue belt drained: every machine finishes crafts, belt W carries advanced circuits on its north
+    lane and sulfur on its south lane only, belt Z engines only, and the packs come at >= 10/min once the chain is warm
+    (measured over the last 3 game minutes)."""
+    blk = B.blue_block(gd)
+    w, h = blk.size
+    clear(X - 8, Y - 26, X + w + 8, Y + h + 26)
+    build(blk.entities, X, Y, "blue")
+    wire_all(X - 1, Y - 1, X + w + 1, Y + h + 1)
+    ports = {p.item: p for p in blk.ports}
+    for item in ("iron-plate", "plastic-bar", "copper-plate", "steel-plate"):
+        p = ports[item]
+        reservoir(X + p.x, Y + p.y, p.direction, item, 20)
+    for fluid in ("water", "petroleum-gas"):
+        p = ports[fluid]
+        lua(f"""
+local e = mk("infinity-pipe", {X + p.x} + .5, {Y + p.y} + .5)
+e.set_infinity_pipe_filter{{name = "{fluid}", percentage = 1}}
+rcon.print("ok")""")
+    out = ports["chemical-science-pack"]
+    V3.DRAINS.append((X + out.x, Y + out.y, out.direction, 4))
+    sink(X + out.x, Y + out.y, out.direction, 4)
+    pole = next(e for e in blk.entities if (e.extra or {}).get("role") == "blue_pole")
+    source(X - 6, Y + 5, X + pole.x, Y + pole.y)
+    probe = f"""
+local r = {{machines = {{}}}}
+for _, e in pairs(s.find_entities_filtered{{area = {{{{{X}, {Y}}}, {{{X + w}, {Y + h}}}}}, force = f}}) do
+  if e.type == "assembling-machine" then
+    local rc = e.get_recipe()
+    r.machines[#r.machines + 1] = {{e.position.x - {X}, rc and rc.name or "", ST[e.status] or "", e.products_finished}}
+  end
+end
+rcon.print(helpers.table_to_json(r))"""
+    run(240)                      # warm-up: cables -> green circuits -> advanced circuits, gears + pipes -> engines
+    m0 = lua_json(probe)
+    run(180)
+    m1 = lua_json(probe)
+    lanes_w = lane_totals(X + 4, X + 18, Y + 7)
+    lanes_z = lane_totals(X + 4, X + 18, Y + 6)
+
+    def crafts(m, recipe):
+        return sum(x[3] for x in m["machines"] if x[1] == recipe)
+    packs_min = 2 * (crafts(m1, "chemical-science-pack") - crafts(m0, "chemical-science-pack")) / 3.0
+    errs = []
+    idle = [x for x in m1["machines"] if x[3] == 0]
+    if idle:
+        errs.append(f"X6: machines that never finished a craft: {idle}")
+    # W flows west: lane 1 (left) is its south lane, lane 2 (right) its north lane
+    south, north = lanes_w[0] or {}, lanes_w[1] or {}
+    if set(south) - {"sulfur"} or set(north) - {"advanced-circuit"}:
+        errs.append(f"X6: belt W lanes mixed (south {south}, north {north})")
+    if set(k for ln in lanes_z for k in (ln or {})) - {"engine-unit"}:
+        errs.append(f"X6: belt Z carries {lanes_z}")
+    if packs_min < 10:
+        errs.append(f"X6: {packs_min:.1f} chemical science packs/min (want >= 10; plan {blk.rates['chemical-science-pack']})")
+    return errs, {"packs_per_min": round(packs_min, 2), "lanes_w": lanes_w, "lanes_z": lanes_z, "machines": m1["machines"]}
+
+
+def case_lab_chain(gd, X, Y):
+    """X7: the blue stage's lab row (expand._lab_feeds): an old lab fed red + green by an inserter, three new labs
+    east of it, each fed by an inserter taking packs out of the lab before it (labs pass packs on), chemical packs
+    put into the first new lab from the south: every new lab gets all three packs."""
+    clear(X - 6, Y - 6, X + 22, Y + 10)
+    lua(f"""
+local function chest(x, y, items)
+  local c = mk("infinity-chest", x, y)
+  for i, n in ipairs(items) do c.set_infinity_container_filter(i, {{name = n, count = 50, index = i}}) end
+end
+mk("lab", {X} + .5, {Y} + .5)
+chest({X} + .5, {Y} - 2.5, {{"automation-science-pack", "logistic-science-pack"}})
+mk("inserter", {X} + .5, {Y} - 1.5, 0)
+for k = 1, 3 do
+  mk("lab", {X} + 4 * k + .5, {Y} + .5)
+  mk("inserter", {X} + 4 * k - 2 + .5, {Y} + .5, 12)
+end
+chest({X} + 4.5, {Y} + 3.5, {{"chemical-science-pack"}})
+mk("inserter", {X} + 4.5, {Y} + 2.5, 8)
+local eei = mk("electric-energy-interface", {X} + 1, {Y} + 5)
+eei.electric_buffer_size = 1e9 eei.power_production = 1e8 / 60 eei.power_usage = 0
+for _, x in ipairs({{2, 6, 10, 14}}) do mk("medium-electric-pole", {X} + x + .5, {Y} + 2.5) end
+mk("medium-electric-pole", {X} - 1.5, {Y} - 1.5)
+rcon.print("ok")""")
+    wire_all(X - 4, Y - 4, X + 20, Y + 8)
+    run(60)
+    m = lua_json(f"""
+local r = {{}}
+for k = 1, 3 do
+  local l = s.find_entities_filtered{{name = "lab", position = {{{X} + 4 * k + .5, {Y} + .5}}}}[1]
+  local c = {{}}
+  for _, it in pairs(l.get_inventory(defines.inventory.lab_input).get_contents()) do c[it.name] = it.count end
+  r[#r + 1] = c
+end
+rcon.print(helpers.table_to_json(r))""")
+    errs = []
+    for k, c in enumerate(m, 1):
+        miss = {"automation-science-pack", "logistic-science-pack", "chemical-science-pack"} - set(c or {})
+        if miss:
+            errs.append(f"X7: new lab {k} has no {sorted(miss)} ({c})")
+    return errs, {"labs": m}
+
+
+def case_pipe_span(gd, X, Y):
+    """X8: a 30-tile straight pipe east from an infinity pipe, as expand._ptg_compress turns it into pipe-to-ground
+    pairs back to back (the blue stage's petroleum and water lines): water reaches its last pipe."""
+    from factorio_claude.planner.blocks import PE
+    route = [PE("pipe", X + x + 0.5, Y + 0.5, 0) for x in range(30)]
+    ents, under = E._ptg_compress(gd, route)
+    clear(X - 4, Y - 4, X + 34, Y + 4)
+    build(ents, 0, 0, "pipespan")
+    lua(f"""
+local e = mk("infinity-pipe", {X} - .5, {Y} + .5)
+e.set_infinity_pipe_filter{{name = "water", percentage = 1}}
+rcon.print("ok")""")
+    run(10)
+    m = lua_json(f"""
+local p = s.find_entities_filtered{{name = "pipe", position = {{{X} + 29.5, {Y} + .5}}}}[1]
+rcon.print(helpers.table_to_json({{water = p and p.get_fluid_count("water") or -1}}))""")
+    m["entities"] = [[e.name, e.x - X, int(e.direction or 0)] for e in ents]
+    errs = []
+    if len(ents) >= len(route) or not any(e.name == "pipe-to-ground" for e in ents):
+        errs.append(f"X8: nothing compressed ({len(ents)} of {len(route)})")
+    if (m.get("water") or 0) <= 0:
+        errs.append(f"X8: no water at the end of the line: {m}")
+    return errs, m
+
+
 CASES = {"mall": case_mall, "cell_column": case_cell_column, "bus_taps": case_bus_taps, "oil_plant": case_oil_plant,
-         "oil_trigger": case_oil_trigger}
+         "oil_trigger": case_oil_trigger, "blue": case_blue, "lab_chain": case_lab_chain, "pipe_span": case_pipe_span}
 SPOTS = {"mall": (40, 60), "cell_column": (120, 60), "bus_taps": (60, 110), "oil_plant": (140, 110),
-         "oil_trigger": (110, 140)}
+         "oil_trigger": (110, 140), "blue": (20, 190), "lab_chain": (150, 170),
+         "pipe_span": (130, 200)}
 
 
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--slot", type=int, default=31)
     ap.add_argument("--keep", action="store_true", help="leave the server running")
-    ap.add_argument("--no-restart", action="store_true")
+    ap.add_argument("--no-restart", action="store_true", help="use a server already running on the slot's ports")
+    ap.add_argument("--rcon-port", type=int, default=None, help="RCON port of that server (default 27016 + slot)")
     ap.add_argument("cases", nargs="*")
     a = ap.parse_args()
     assert 31 <= a.slot <= 39, "test slots 31-39 only"
     _w, gd = load_fixture(1001)
     for t in RESEARCH:                 # the blocks are made for a force that has these (validator research checks)
         gd.raw["technologies"][t]["researched"] = True
+        for eff in gd.raw["technologies"][t].get("effects") or []:     # ... and build with what they unlock
+            if eff.get("type") == "unlock-recipe" and eff.get("recipe") in gd.raw["recipes"]:
+                gd.raw["recipes"][eff["recipe"]]["enabled"] = True
     if not a.no_restart:
         print(restart(a.slot)[-400:])
-    rcon._client = rcon.Rcon("127.0.0.1", 27016 + a.slot, "testpw")
+    rcon._client = rcon.Rcon("127.0.0.1", a.rcon_port or 27016 + a.slot, "testpw")
     for _ in range(40):
         try:
             rcon.lua("rcon.print('ping')")

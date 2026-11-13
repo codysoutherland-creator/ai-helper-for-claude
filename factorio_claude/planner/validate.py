@@ -639,6 +639,8 @@ class _Validator:
             return r.outputs
         if r.type in CRAFTER_TYPES:
             return r.outputs
+        if r.type == "lab":        # (only into another lab: labs pass their packs on, see _machine_io)
+            return {"*"} if r.existing else set(r.inputs)
         return set()
 
     def _recipe_products(self, rc) -> set:
@@ -1139,7 +1141,11 @@ class _Validator:
             if s is d:
                 self.err("inserter_pickup", r, f"{r.label} picks up from and drops into the same {s.name}")
                 continue
-            if sn is None and s.type not in CONTAINER_TYPES | CRAFTER_TYPES and not s.existing:
+            if s.type == "lab" and sn is None and (dn is not None or d.type != "lab"):
+                self.err("inserter_pickup", r, f"{r.label} takes packs out of {s.label}: an inserter only takes "
+                                               f"science packs out of a lab into another lab")
+                continue
+            if sn is None and s.type not in CONTAINER_TYPES | CRAFTER_TYPES | {"lab"} and not s.existing:
                 self.err("inserter_pickup", r, f"{r.label} picks up from {s.label}, which has no output inventory")
                 continue
             if dn is None and not self.accepts(d, {"*"}) and not d.existing:

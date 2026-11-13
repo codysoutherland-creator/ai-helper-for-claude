@@ -23,7 +23,7 @@ GROUPS = ("AUTO", "ACQ", "MALL", "RES", "ORG", "SCALE", "PWR", "SAFE")
 CHAT_GROUPS = ("AUTO", "ACQ", "ORG", "SCALE")      # what the chat prompt gets (section 6.4)
 # the chat prompt's 400 tokens hold one or two rules per group, most important first
 CHAT_RULES = ("AUTO-1", "AUTO-4", "ACQ-2", "ORG-1", "ORG-2", "ORG-6", "SCALE-2", "SCALE-4", "ORG-3", "AUTO-3")
-AUTOPILOT_BUDGET = 2000          # round 3: +oil, feeds and mall rules (was 1500)
+AUTOPILOT_BUDGET = 2200          # round 5: +the robot network rules (round 3: 2000 with oil, feeds and mall rules)
 CHAT_BUDGET = 400
 ACQUISITION_ORDER = ("inventory", "mall", "producer", "chest", "player", "wait", "short_craft", "handcraft",
                      "smelt_mine")
@@ -183,12 +183,15 @@ def is_combat(name: str) -> bool:
     return any(name == p or name.startswith(p + "-") for p in conventions()["research_skip_peaceful"])
 
 
-def research_order(gd, researched=None, packs_made=None, needed=(), limit=3, peaceful=True, low_value=False) -> list:
+def research_order(gd, researched=None, packs_made=None, needed=(), limit=3, peaceful=True, low_value=False,
+                   defend=False) -> list:
     """Techs to queue next, best first: available (prerequisites done, not a trigger tech), not done, and only with
     science packs the base makes (packs_made: pack items, default red only, plus green once logistic-science-pack is
     researched - a tech that needs a pack nobody makes blocks the labs). Ranked: techs an open goal needs
     (`needed`), then the doctrine order, then every other useful tech cheapest first; low-value ones (lamps, radar,
-    repair packs) only with low_value=True; weapons and armour only when enemies are around (peaceful=False)."""
+    repair packs) only with low_value=True; weapons and armour only when enemies are around (peaceful=False).
+    defend: enemies are around and red science runs (doctrine RES-5): Gun turrets and Stone wall come right after the
+    goal's techs."""
     techs = (gd.raw.get("technologies") or {}) if gd is not None else {}
     done = set(researched) if researched is not None else {n for n, t in techs.items() if t.get("researched")}
     if packs_made is None:
@@ -213,7 +216,8 @@ def research_order(gd, researched=None, packs_made=None, needed=(), limit=3, pea
         return int(t.get("unit_count") or 0) * (t.get("unit_energy") or 0)
 
     out = []
-    for name in list(needed) + conventions()["research_order"]:
+    first = list(conventions()["research_defense"]) if defend and not peaceful else []
+    for name in list(needed) + first + conventions()["research_order"]:
         if name not in out and ok(name):
             out.append(name)
     if len(out) < limit:   # every other useful tech the packs allow keeps the labs busy (cheapest first)
@@ -426,7 +430,7 @@ def check(gd) -> list:
         e = ents.get(name)
         if not e or not _close(e.get("crafting_speed") or 0, v):
             bad(f"crafting speed {name}: {v} in the doctrine, {e and e.get('crafting_speed')} in the game")
-    for name, r in (oil.get("recipes") or {}).items():
+    for name, r in {**(oil.get("recipes") or {}), **(oil.get("robot_recipes") or {})}.items():
         rec = _recipe(gd, name)
         if not rec:
             bad(f"recipe {name}: not in the game data")

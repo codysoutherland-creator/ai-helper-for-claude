@@ -219,6 +219,7 @@ The Director evaluates the rules in order. The first rule that returns an action
 | R7 verify | a stage built more than 5 game-min ago and not verified | measure, then a fix or `verified` |
 | R8 expand | every master stage is built and verified, and the next goal G2+ needs a template | `expand.extend(mp, goal)` (section 8), which appends a stage; then R2 |
 | R9 mall pressure | hand-craft share > 40% over the last 30 game-min, or the same item short 3 times, once the mall exists | move G2 (or a mall extension with that item) to the front |
+| R11 radar | the base has power and fewer radars than it wants (1 + 1 per 192 tiles of span + 1 while something must be found), power headroom for 300 kW more | the Radar tech (queued last), then `expand.extend(mp, "radar")` with the chunk survey; then R2 |
 
 ### 4.4 When Claude decides, and how
 
@@ -567,6 +568,35 @@ overlaps an earlier one except planned swaps. New quality gates:
 **Adopted masters.** A master from an older save, such as the real copy with S2 applied, is extended the same way.
 If its S0-S5 are still future, the autopilot first finishes them.
 
+### 8.3 Robot network (round 5, G11)
+
+After blue science the robots take over building: the autopilot's ghosts are built by construction robots instead of
+the helper walking, and the mall's chests become logistic chests the robots take from.
+
+- **Research path** (2.1 names, data export): Battery (sulfur processing, red + green) and Electric engine, which needs
+  Lubricant, which needs Advanced oil processing (lubricant is made from heavy oil; basic oil processing makes none),
+  lead to Robotics (flying robot frames), then Construction robotics (roboports, construction robots, storage and
+  passive provider chests) and Logistic robotics (logistic robots). Requester and buffer chests are behind Logistic
+  system, which needs space science in Space Age: not on this roadmap.
+- **Robot mall** (`blocks.robot_block`, template `robots`, the goal's template): its own refinery on advanced oil
+  processing feeding a lubricant plant and a sulfur -> sulfuric acid -> battery chain, the circuit and engine
+  machines, electric engines, frames, and the products into chests (construction and logistic robots, roboports,
+  storage and passive provider chests) that are the helper's mall sources. Light oil is not used: a tank (25,000)
+  buffers it, which lets the refinery run ~550 cycles (~500 frames) before it backs up. Cracking it to petroleum (or
+  burning it) is not built yet; with a full light oil tank the robot mall stops making frames.
+- **Roboport grid** (template `roboports`, repeatable, rule R12): roboports whose construction areas (110x110) cover
+  the master's built area and whose logistic areas (50x50) overlap so they form one network; the first next to the
+  hub with storage chests beside it. Planned again whenever the base grows past the covered area.
+- **Bootstrap** (R12): the helper carries the robot mall's construction robots into a roboport and passive provider
+  chests into the storage chest; the mall chests inside the logistic area are then marked for upgrade (the robots
+  swap them for passive providers, keeping their contents and inventory bar), so the robots take what ghosts need
+  straight from the mall. Later a few logistic robots.
+- **Helper** (`agent.lua` build_ghosts, R6): a ghost inside a network's construction area that has construction
+  robots, whose item is in that network and with no tree in its footprint is left to the robots; the helper builds
+  the rest. R6 does not restart the helper for a plan whose ghosts are all the robots' while they build; after
+  `ROBOT_STALL_MIN` (5 game minutes) without one built, the helper builds them too (`no_robots`). Defence rebuilds go
+  through build_ghosts and get this for free.
+
 ## 9. GUI, status line and chat
 
 - **Toggle.** A new row at the top of the Helper tab: a "Let Claude play" checkbox (host only, disabled with a
@@ -773,6 +803,36 @@ Round 1's verification failed Q1-Q4 and Q6. What changed:
   the base does not make is never queued, and R1c takes such a tech (queued by Claude, say) out again
   (`autopilot_research` op). Weapons, walls, turrets and armour are skipped while the game is peaceful (peaceful mode
   or no spawners); lamps, radar and repair packs are never fillers.
+- **Defence (R10, `defense.lua`; v2).** With enemies on the map Gun turrets and Stone wall are queued before the
+  first attack: right after the running tech once red science is automated, in front of the queue when a nest is in
+  the pollution cloud, within 160 tiles of the base's buildings, or biters attacked (doctrine RES-5; Military and
+  Military 2 follow the doctrine order). An attack with no turret near it gets a 4-turret group; every 10 game minutes
+  the threats check places at most 2 groups toward nests in the cloud or within 1 chunk of it (2 while the cloud's
+  total grows, 3 while it grows by more than 2%/min), nearest to the base first with each chunk still to go counting
+  as 32 tiles (`rank_threats`). Once Stone wall is researched each group gets a wall arc toward its nest (a straight
+  line 2 tiles past the turrets, 2 past the outer ones, 3-tile wings back toward the base), placed only when no tile
+  of it is a gap (water counts as closed; tried 1 and 2 tiles further out); groups placed earlier (also 0.7.x
+  groups, clustered once from the map) are walled later. Firearm magazines come from the mall (slot 11, gated by Gun
+  turrets; a mall built earlier gets it in its reserved room through the repeatable `mall_add` expansion) and the
+  rearm task takes them from the mall's chests, then other chests, then waits at the magazine machine before
+  hand-crafting. Engine checks: `tests/live_defense.py`.
+- **Radar network (R11, `expand.py` template `radar`, stage key `x_radar`).** 2.1 locks the radar recipe behind the
+  Radar tech (20 red packs; the data export says so, unlike 1.1), so R11 queues it at the end of the research queue
+  once red science runs and the master exists. Then one radar next to the hub once the base has power, one more per
+  192 tiles of the master's span and one more while an expansion found nothing on the charted map (oil: no crude; a
+  grow cell: no patch with room), at most 6, one at a time. Each draws 300 kW all the time: a radar is planned only
+  while the load with it stays under 80% of capacity (an exploring radar that does not fit sets need_power, so R8
+  grows power first). The planner puts later radars on a ring 3-14 tiles outside the master's bounding box, at least
+  168 tiles (along x or y) from every other radar (the 7x7 chunks each keeps charted, less a quarter), toward the
+  octant the game's chunk survey (`autopilot_chart_survey`) finds least charted and toward the nearest known patch of
+  what the autopilot needs; a pole chain of at most 12 poles joins it to the master's network and the stage is
+  validated like any other. When no edge spot is that far from the radars there are (a starter-sized base), the
+  exploring radar waits until the master's span grew by 32 tiles (no retries, no power growth for it meanwhile); a
+  planned expansion clears its recorded failure, so R11 stops exploring for it. What radar reveals is used:
+  `autopilot_observe` reports the charted chunk count (`on_chunk_charted`, counting each chunk once: the event also
+  fires on every re-chart of a radar's nearby chunks), and when it grows by 10% (8+ chunks) R8 gives the expansions that found nothing charted their
+  tries back and unblocks their goals; `defense_threats` and the minute's nest sample also search the area every
+  radar keeps charted (nests in newly charted / generated chunks), nearest to the spawn or a radar first.
 - **Goals.** A goal is never done before its needs; once done it stays done (latched: one milestone line each, no
   G0/G1 flicker); a rate goal needs two observations in a row; power headroom needs a real load (500 kW+); G3 counts
   furnace capacity; G2 is ready once the electric-drill stage is being built.
@@ -877,3 +937,97 @@ roadmap to go past red and green. What changed:
   backs up), ORG-7 (mall gets the first pick), ORG-8 (short, straight feeds; no lone feeder from a far patch), RES-4
   (the oil path); oil facts (refinery and plant speeds, the three oil recipes, pumpjack 10 crude/s at 100% yield)
   checked against the game data by `check()`; the autopilot prompt budget is 2,000 tokens with the safety rules first.
+
+## 17. As built: round 4 (blue science, G10)
+
+- **Shipped.** `SHIPPED_ROUND = 4`: G10 (`template: blue`, needs G9) is planned by R8 once its research is done.
+  Research path (2.1 names from the data export; 1.1's "advanced-electronics" does not exist): Engine, Advanced
+  circuit, Sulfur processing, Chemical science pack - all red + green, queued by R1 as the goal's techs. Assemblers 2
+  need Automation 2, which comes before Fluid handling (the oil stages). `EXPAND_GATE["blue"]` = `GATES["blue"]`.
+- **`blocks.blue_block`** (75 x 15, 402 entities): one row of 17 machines between two belt pairs (cable -> advanced
+  circuit <- green circuit by direct insertion, C A G C A G C A G C; engines between a gear and a pipe machine, Gr E P
+  E Gr E P), four chemical science machines on a short row above them, a sulfur chemical plant at the east end.
+  Belt A carries iron (north lane) and plastic (south lane), belt B copper then (after a gap tile) steel; belt W
+  advanced circuits (north lane) and sulfur (south lane), belt Z engines. Assemblers 2 for advanced circuits,
+  engines and packs: 13.5 packs/min (the engines' rate; packs 15, advanced circuits 22.5). Per pack 7 iron + 5 more
+  for the steel, 7.5 copper, 3 plastic, 7.5 petroleum, 7.5 water (half a sulfur; `PLATES_PER` has the plates, so R7's bottleneck check
+  covers blue). The sulfur recipe's water goes into the chemical plant's 1st input, petroleum into its 2nd (the
+  recipe's order; the validator assigns it that way and the engine agrees).
+- **`expand.blue`**: the block beside the plate bus on its tap side (a port on the far side of the bus corridor can't
+  be reached), iron (2 tap inserters) and copper taps downstream of the mall's; steel out of the steel column's depot
+  chest and plastic out of the oil plant's (an inserter out of each chest onto a new belt: when the block takes less
+  the belt backs up and the chest fills again for the helper); petroleum piped from a free tile beside the oil plant's
+  header (never on the refinery's heavy / light oil outputs next to it); water from an offshore pump of its own; the
+  packs on a belt to a row of 3-6 NEW labs chained from one of the master's labs (an inserter takes the red and green
+  packs out of the old lab, each new lab passes them on, the blue packs go into one of the new labs). The free strips
+  beside a science block's lab columns hold its poles on most fixture maps, so a belt along the old labs rarely fits.
+  Long straight pipes become pipe-to-ground pairs (`_ptg_compress`: 318 pipes -> 45 pipes + 68 pipe-to-grounds on
+  1001). Spots score their distance to every source and penalise ports whose source lies behind them (the router's
+  long detours around the block crossed themselves). Feeds may enter only the source's own zone (the tiles beside a
+  depot, the oil header, the lab stack), never the bus lanes, mall slots or power units.
+- **Rate check.** `expand.blue_rate` gives the blue stage's pack rate (13.5/min) to R7 like the starter stages'.
+- **Validator.** An inserter may take packs out of a lab into another lab (lab chaining); out of a lab onto a belt is
+  an error.
+- **Tests.** Offline: the block validates on its own, water / petroleum swapped does not; the whole stage on 2002 hub
+  (mall, steel, science, oil on synthetic wells, oil plant, blue) validates and stays monotone; pipe compression;
+  lab chaining; R8 plans blue after the oil plant once the four techs are done, G10 is done at 10+ packs/min. On the
+  five fixture masters the stage fits 4 of 5 (750-930 entities, 6-30 s of planning): 3003 onsite fails (no
+  pack belt from any block spot reaches a lab row inside the starter base within 220 tiles).
+  Engine (headless test server, speed 10, setup cheats: research set, plates / steel / plastic from refilled
+  reservoir belts, water and petroleum from infinity pipes, instant build): X6 the block makes 13.3 packs/min after
+  4 game minutes of warm-up, W and Z lanes as planned; X7 three chained labs each get red, green and blue packs; X8
+  a 30-tile compressed pipe carries water. Not engine-checked: a whole blue stage on a map (its routed feeds), the
+  helper building it, the autopilot reaching G10 in a real game.
+
+## 18. As built: round 5 (robot network, G11)
+
+- **Shipped.** `SHIPPED_ROUND = 5`: G11 (`template: robots`, needs G10; done = Construction robotics researched and
+  a roboport whose network has 10+ construction robots). Research path from the data export (section 8.3): Battery,
+  Advanced oil processing, Lubricant, Electric engine, Robotics, Construction robotics, Logistic robotics - queued by
+  R1 as the goal's techs, each once its prerequisites are done. Doctrine: RES-6 (the path), ORG-9 (robots build;
+  the helper only walks to the rest); facts (techs, unlocks, recipe inputs, the four oil/acid/battery recipes) are
+  checked against the game data by `check()`. Autopilot prompt budget 2,200 tokens.
+- **`blocks.robot_block`** (90 x 25 bounding box, L-shaped: the 90 x 9 row plus a 17 x 16 fluid section above its
+  frame machines; `info["shape"]` and `_spots(shape=...)` only need those two rects free). Four east-flowing belts,
+  one plate lane and one intermediate lane each: N2 steel / frames, N1 iron / advanced circuits, S1 copper / green
+  circuits, S2 plastic / engines. Row: C A G C A G C, Gr E P, Bat Fr EE (battery chemical plant and electric engine
+  assembler 2 by direct insertion into the frame machine), CR, St Sc Pp, Gr Rp, LR; acid and lubricant come down from
+  the fluid section through pipe-to-ground pairs under N2/N1. The order is the priority on the shared lanes:
+  construction robots first, logistic robots last. Fluid section: refinery on advanced oil processing (water + crude),
+  lubricant plant, sulfur plant -> sulfuric acid plant (iron by a long-handed inserter over N2), light and heavy oil
+  tanks. 2.25 frames/min planned; roboports ~1 per 3-4 minutes (45 advanced circuits each).
+- **`expand.robots`**: the block beside the bus (iron, copper taps downstream of the mall's), steel and plastic out
+  of their depot chests or, when the blue stage's feeds took a chest's free sides, a tap on a master belt carrying
+  only that item; crude branched off the oil plant's crude pipes (`_petroleum_feed(role="crude_pipe")`), water from
+  an own offshore pump. Feeds standing in another stage's reserved room belong to that zone (as blue's).
+- **`expand.roboports`** (repeatable): up to 4 roboports a stage; candidates every 4 tiles around the network plus
+  every 2 tiles around mall chests still outside the logistic area, each linked (Chebyshev <= 48 to a roboport: the
+  50x50 logistic areas overlap), scored by built-area points (8x8 cells) newly in a 110x110 construction area plus 6
+  per mall chest newly in a logistic area; the first stage adds 2 storage chests beside the first roboport. Radii
+  from the data export (`export_data.lua` now exports them), else 25 / 55. `roboport_coverage` (masters summary
+  "robots") drives R12.
+- **R12** (after R11; its upkeep also runs while a planner job is busy): roboport stages while the summary has
+  uncovered points or mall chests outside the network (3 failed tries: a note and an hour's rest); the helper brings
+  construction robots (25 per roboport, 20-200, batches of 50, into the emptiest roboport), passive provider chests
+  into the storage chest, then `autopilot_logistic_chests` marks the mall chests inside the logistic area for upgrade
+  (the robots swap them, contents and inventory bar kept, re-registered as mall chests by `on_robot_built`); 20
+  logistic robots once Logistic robotics is done. `world_without_master` treats an upgraded chest as the master's.
+- **Helper / R6**: `agent.robots_cover(ghost)` = a construction network with robots (idle or busy - busy ones come
+  next; the spec said idle, but the helper racing busy robots only wastes its trips), the item in the network, no
+  tree/rock in the footprint. build_ghosts leaves those ("left N ghosts to the construction robots"); observe's plan
+  rows carry `robot_ghosts` (at most 1,500 ghost checks per observe); R6 skips a plan whose ghosts are all the robots'
+  until 5 game minutes pass without one built, then restarts the helper with `no_robots`. Robot builds now register
+  mall chests / plan ownership (`on_robot_built_entity`, previously only player and script builds did). Defence's
+  periodic rebuild skips ghosts the robots cover.
+- **Tests.** Offline: block validation and names, the stage on 2002 hub after blue (validates, monotone, mall
+  sources), the roboport grid (one network, full coverage, every mall chest in the logistic area), coverage growth,
+  the upgraded-chest rule; R12 / R6 / G11 / executor rules. Fixture fits (blue chain then robots then roboports;
+  synthetic crude wells): the robot mall fits 1001, 2002, 3003 and 4004 hub and 1001 and 3003 onsite (830-1,000 entities, 30-55 s of planning, 169 s on 4004), then 6-9 roboports in 2-3 stages cover each base and bring every mall chest into the network; 2002 onsite does not get that far (its oil plant stage fails first). Engine (headless test server, `tests/live_robots.py`, speed 10,
+  setup cheats: research set, reservoir belts, infinity pipes, instant build, script-registered mall chests): RB1 the
+  block runs - advanced oil processing, lubricant, electric engines, batteries, 2.29 frames/min, all five products,
+  lanes as planned, both tanks fill; RB2 roboport radii 25 / 55 and the export fields; RB3 robots build the plan's
+  in-network ghosts from a storage chest while the helper builds only the one outside, observe's network status and
+  `robot_ghosts`, a mall chest upgraded to a passive provider keeping contents and bar; RB4 the R12 seed tasks bring
+  30 robots from a mall chest into a roboport. Not engine-checked: a whole robot stage or roboport grid built on a
+  map, the companion loop running R12 end to end, the robots building a real autopilot stage from passive-provider
+  mall chests, light-oil tank exhaustion (~500 frames; no cracking).

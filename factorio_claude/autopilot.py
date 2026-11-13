@@ -32,7 +32,7 @@ from . import knowledge as K
 from . import link, policy
 from .autopilot_rules import (Action, Director, Memory, Snapshot, StuckTracker, active_master, as_dict, as_list,
                               current_goal, goal_actionable, goal_status, master_progress, open_options, progress_key,
-                              progressed, prompt_snapshot, safe_id, safe_text)
+                              progressed, prompt_snapshot, rank_threats, safe_id, safe_text)
 
 log = logging.getLogger("companion")
 EXPAND_OF = {"steel_column": "steel", "science_block": "science"}     # roadmap template -> expansion template
@@ -362,26 +362,46 @@ class Executor:
         return {"ok": True, "queued": out}
 
     def do_defend(self, a, snap):
-        args = {k: a.args[k] for k in ("x", "y", "toward_x", "toward_y", "n") if k in a.args}
+        args = {k: a.args[k] for k in ("x", "y", "toward_x", "toward_y", "n", "walls") if k in a.args}
         r = self.call("defense_place_turrets", plan=f"defense-{snap.tick // 60}", **args)
-        return {"ok": bool((r or {}).get("placed")), "placed": len((r or {}).get("placed") or []), "at": (r or {}).get("at")}
+        r = r or {}
+        return {"ok": bool(r.get("placed")), "placed": len(r.get("placed") or []), "at": r.get("at"),
+                "walls": r.get("walls"), "walls_skipped": r.get("walls_skipped")}
 
     def do_defend_threats(self, a, snap):
-        """Nests whose chunk the pollution reaches: a turret group between the nearest part of the base and each (at
-        most 2 per check), unless turrets already stand within 24 tiles of that spot."""
+        """Nests the pollution reaches, or is about to (defence v2: within a margin of the cloud that grows with the
+        cloud's trend; rank_threats, nearest first): a turret group between the nearest part of the base and each (at
+        most max_groups per check), unless turrets already stand within 24 tiles of that spot; walls in front once
+        Stone wall is researched."""
         threats = [t for t in as_list(self.call("defense_threats", radius=400)) if isinstance(t, dict)]
+        ranked = rank_threats(threats, float(a.args.get("trend") or 0), float(a.args.get("pollution") or 0))
+        cap = int(a.args.get("max_groups") or 2)
         out = []
-        for t in threats:
-            base = as_dict(t.get("base"))
-            if float(t.get("pollution") or 0) <= 0 or not base or len(out) >= 2:
-                continue
-            if any(abs(o["x"] - base["x"]) < 24 and abs(o["y"] - base["y"]) < 24 for o in out):
-                continue
-            r = self.call("defense_place_turrets", x=base["x"], y=base["y"], toward_x=t["x"], toward_y=t["y"], n=4,
-                          plan=f"defense-{snap.tick // 60}-{len(out)}", skip_if_turrets=24)
+        for c in ranked:
+            if len(out) >= cap:
+                break
+            base, (nx, ny) = c["base"], c["nest"]
+            r = self.call("defense_place_turrets", x=base["x"], y=base["y"], toward_x=nx, toward_y=ny, n=4,
+                          plan=f"defense-{snap.tick // 60}-{len(out)}", skip_if_turrets=24,
+                          walls=bool(a.args.get("walls", True)))
             if (r or {}).get("placed"):
-                out.append({"x": base["x"], "y": base["y"], "nest": [t["x"], t["y"]], "placed": len(r["placed"])})
-        return {"ok": True, "groups": out, "threats": len(threats)}
+                out.append({"x": base["x"], "y": base["y"], "nest": [nx, ny], "cloud": c["cloud"],
+                            "placed": len(r["placed"]), "walls": r.get("walls")})
+        return {"ok": True, "groups": out, "threats": len(threats), "candidates": len(ranked)}
+
+    def do_defend_walls(self, a, snap):
+        """Turret groups without a wall arc (placed before Stone wall was researched): an arc in front of each."""
+        out = []
+        for g in as_list(a.args.get("groups")):
+            g = as_dict(g)
+            if g.get("x") is None:
+                continue
+            r = self.call("defense_place_walls", x=g["x"], y=g["y"], toward_x=g.get("toward_x"),
+                          toward_y=g.get("toward_y"), surface=g.get("surface"), group=g.get("plan"),
+                          plan=f"defense-wall-{snap.tick // 60}-{len(out)}")
+            out.append({"x": g["x"], "y": g["y"], "placed": len((r or {}).get("placed") or []),
+                        "skipped": (r or {}).get("skipped")})
+        return {"ok": any(o["placed"] for o in out), "groups": out}
 
     def do_bootstrap_packs(self, a, snap):
         x, y = a.args["lab"]
@@ -414,8 +434,31 @@ class Executor:
         return {"ok": True, "queued": self.call("agent_tasks", tasks=tasks, replace=False)}
 
     def do_helper_restart(self, a, snap):
-        r = self.call("plan_helper", id=a.args["plan"], what="build", autopilot=True)
+        # (no_robots: R6 found the robots made no progress on the plan's ghosts: the helper builds those too)
+        r = self.call("plan_helper", id=a.args["plan"], what="build", autopilot=True,
+                      no_robots=True if a.args.get("no_robots") else None)
         return {"ok": True, "msg": (r or {}).get("msg")}
+
+    def do_seed_robots(self, a, snap):
+        """R12 bootstrap: the helper takes robots (or passive provider chests) out of the robot mall's chests and puts
+        them into a roboport (or the robots' storage chest)."""
+        item, n = a.args["item"], int(a.args.get("count") or 0)
+        x, y = float(a.args["x"]), float(a.args["y"])
+        if n <= 0:
+            return {"ok": False, "error": "nothing to bring"}
+        if not snap.helper.get("alive"):
+            self.call("agent_quick", action="spawn", x=x, y=y)
+        tasks = [{"type": "acquire", "item": item, "count": n, "x": x, "y": y, "autopilot": True, "soft": True},
+                 {"type": "insert", "x": x, "y": y, "item": item, "count": n, "name": a.args.get("into") or "roboport",
+                  "autopilot": True, "soft": True}]
+        return {"ok": True, "queued": self.call("agent_tasks", tasks=tasks, replace=False), "item": item, "count": n}
+
+    def do_logistic_chests(self, a, snap):
+        """R12: the mall chests inside the logistic area marked for upgrade to passive providers (the robots swap
+        them)."""
+        r = self.call("autopilot_logistic_chests", max=int(a.args.get("max") or 32)) or {}
+        return {"ok": bool(r.get("ordered") or r.get("marked")), "ordered": r.get("ordered"), "marked": r.get("marked"),
+                "providers": r.get("providers")}
 
     def do_next_stage(self, a, snap):
         S = self._server()
@@ -576,15 +619,37 @@ class Executor:
         t0 = time.monotonic()
         world, gd = self._expansion_world(mp, tpl)
         keepout = [b[:4] for b in as_list(snap.ap.get("keepout")) if len(as_list(b)) >= 4]
+        hints = self._radar_hints(mp, gd, a) if tpl == "radar" else None
         try:
-            info = E.extend(mp, world, gd, tpl, after=a.args.get("after"), keepout=keepout)
+            info = E.extend(mp, world, gd, tpl, after=a.args.get("after"), keepout=keepout, hints=hints)
         except E.ExpandError as e:
             return {"ok": False, "error": str(e)[:300], "seconds": round(time.monotonic() - t0, 1)}
         mp.save(S.PLANS)
         sent = self.offer_from(mp, info["stage"], world, gd, snap)
         return {"ok": True, "template": tpl, "stage": M.slabel(info["stage"]), "entities": info["entities"],
                 "feed_belt_tiles": info.get("feed_belt_tiles"), "chests": len(info.get("chests") or []),
-                "items": info.get("items"), "sent": sent, "seconds": round(time.monotonic() - t0, 1)}
+                "items": info.get("items"), "sent": sent, "seconds": round(time.monotonic() - t0, 1),
+                **({"radar": info.get("radar"), "dir": info.get("dir"), "toward": (hints or {}).get("toward")}
+                   if tpl == "radar" else {})}
+
+    def _radar_hints(self, mp, gd, a) -> dict:
+        """R11: what the planner needs beyond the export to point the next radar: the resources to look for (the
+        action's "toward") and the game's chunk survey per octant around the master, in the ring a radar on its edge
+        would scan (the export covers only the master plus a margin; uncharted chunks are simply missing from it)."""
+        from .planner import expand as E
+        hints = {"toward": [t for t in (safe_id(x) for x in as_list(a.args.get("toward"))) if t]}
+        xs = [e.x for e in mp.ents] or [0.0]
+        ys = [e.y for e in mp.ents] or [0.0]
+        half = max(max(xs) - min(xs), max(ys) - min(ys)) / 2
+        _near, scan = E.radar_reach(gd)
+        r0 = int(half // 32)
+        try:
+            survey = self.call("autopilot_chart_survey", x=(min(xs) + max(xs)) / 2, y=(min(ys) + max(ys)) / 2,
+                               r0=r0, r1=min(32, r0 + scan), **({"surface": mp.surface} if mp.surface else {}))
+            hints["octants"] = [o for o in as_list((survey or {}).get("octants")) if isinstance(o, dict)]
+        except link.LinkError as e:
+            log.info("autopilot: chart survey failed (%s); the radar goes by the export alone", e)
+        return hints
 
     def offer_from(self, mp, k, world, gd, snap):
         """Send stage k and every later stage that is not in the game yet (or only waiting) as waiting autopilot
@@ -774,18 +839,34 @@ class Autopilot:
                 rates = {}
                 if self._load_gd() is not None:
                     for s in mp.stages:
+                        if s.key.startswith("x_blue"):
+                            # round 4: the blue block's machines give its pack rate (R7 checks it like a stage's)
+                            rates[M.plan_id(mp, s.index)] = E.blue_rate(mp, self.gd, s.index)
+                            continue
                         if s.key.startswith("x_"):
                             continue          # an expansion: the starter base's rate model does not cover it
                         try:
                             rates[M.plan_id(mp, s.index)] = M.stage_rates(mp, self.gd, s.index)
                         except Exception:  # noqa: BLE001
                             pass
+                # defence v2: what the mall row could still add once its research is done (R8 mall_add)
+                from .planner import blocks as B
+                have_items = E.mall_items(mp)
+                addable = ({i: t for i, t in B.MALL_GATE.items() if i in B.MALL_SLOTS and i not in have_items}
+                           if have_items else {})
+                # radar network (R11): the master's radars and its span (the longer side of its bounding box)
+                xs, ys = [e.x for e in mp.ents] or [0.0], [e.y for e in mp.ents] or [0.0]
+                radar = {"n": len(E.radars_of(mp)), "span": round(max(max(xs) - min(xs), max(ys) - min(ys)), 1)}
+                # robot network (R12): the master's roboports and the built-area points no construction area reaches
+                robots = (E.roboport_coverage(mp, self.gd)
+                          if self.gd is not None and "robots" in E.templates_built(mp) else {})
                 c = (mtime, mp.stats.get("owner"), stages, rates, bool(mp.stats.get("autopilot_abandoned")),
-                     E.templates_built(mp))
+                     E.templates_built(mp), addable, radar, robots)
                 self.masters_cache[mid] = c
                 self.director.stage_rates.update(rates)
             owner = "autopilot" if (m["owner"] == "autopilot" or c[1] == "autopilot") else "player"
-            out[mid] = {"owner": owner, "seq": m["seq"], "abandoned": c[4], "templates": c[5],
+            out[mid] = {"owner": owner, "seq": m["seq"], "abandoned": c[4], "templates": c[5], "mall_addable": c[6],
+                        "radar": c[7], "robots": c[8],
                         "stages": [{**s, "row": m["rows"].get(s["plan"])} for s in c[2]]}
         return out
 
@@ -917,10 +998,18 @@ class Autopilot:
             tpl = a.args.get("template")
             self.expansions.append((snap.minute, tpl, bool(out.get("ok"))))
             if out.get("ok"):
-                what = {"mall": "the mall (belts, inserters, drills, assemblers from assemblers)",
+                # (review: a stale error kept R11 exploring for crude oil after the oil stage had been planned)
+                self.mem.failed.pop(tpl, None)
+                what = {"mall":"the mall (belts, inserters, drills, assemblers from assemblers)",
                         "power_grow": "more steam power", "steel": "steel smelting on the plate bus",
                         "science": "a second red + green science block", "oil": "pumpjacks on crude oil",
-                        "oil_plant": "an oil refinery and plastic"}.get(tpl, tpl)
+                        "oil_plant": "an oil refinery and plastic",
+                        "blue": "blue science (sulfur, engines, advanced circuits, chemical science packs)",
+                        "mall_add": "more mall items (" + ", ".join(out.get("items") or []) + ")",
+                        "radar": "a radar" + (" toward " + ", ".join(out["toward"]).replace("-", " ")
+                                              if out.get("toward") else ""),
+                        "robots": "the robot mall (robots, roboports, logistic chests)",
+                        "roboports": "roboports (construction robots build in their area)"}.get(tpl, tpl)
                 self._milestone(f"Planned {what} ({out.get('stage')}, {out.get('entities')} entities); building "
                                 f"it next.")
             else:

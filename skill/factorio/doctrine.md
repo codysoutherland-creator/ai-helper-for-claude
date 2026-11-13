@@ -26,6 +26,8 @@ Generated from `factorio_claude/knowledge/doctrine.json` and `roadmap.json` by `
 - **RES-2**: Trigger techs: Steam power needs 50 iron plates made, Electronics 10 copper plates, Automation science pack one lab crafted by a player, Oil processing a pumpjack that mines crude oil.
 - **RES-3**: Automation unlocks assembling machine 1 and long-handed inserters; Logistics unlocks underground belts and splitters; Electric mining drill needs only the red science pack tech; oil needs Automation 2 (Fluid handling requires it), so green science comes before oil.
 - **RES-4**: After red and green: steel, then oil. Oil gathering gives pumpjacks; a pumpjack pumping crude finishes Oil processing (refinery, chemical plant); Plastics then turns petroleum + coal into plastic (1 basic refinery feeds ~0.45 plastic plants). Next: sulfur, engines, advanced circuits and blue science.
+- **RES-5**: With enemies on the map (never in peaceful mode): Gun turrets and Stone wall as soon as red science is automated, at once when a nest is in the pollution cloud or within 5 chunks of the base or biters attacked. Military later for better ammo (Military 2: piercing rounds). Firearm magazines come from the mall; each turret group gets a short wall arc toward its nest.
+- **RES-6**: Robots after blue science: Battery and Electric engine (Lubricant, then Advanced oil processing: lubricant is made from heavy oil) lead to Robotics (frames), then Construction robotics (roboports, construction robots, storage and passive provider chests) and Logistic robotics. Requester chests need Logistic system: space science in Space Age.
 
 ## Organization
 
@@ -37,6 +39,7 @@ Generated from `factorio_claude/knowledge/doctrine.json` and `roadmap.json` by `
 - **ORG-6**: Never rebuild the player's spaghetti: build the new organized block next to it and leave the old one running.
 - **ORG-7** (c): Growth hangs off one straight plate bus: smelting cells (electric drills on the ore, a column at their head) feed its head, and every new block (steel, more science) takes its plates from the bus with taps on its free side, downstream of the mall's taps (the mall gets the first pick). The bus corridor keeps room for 8 lanes.
 - **ORG-8** (c): Feeds are short and straight: at most 1.4x the straight-line (taxicab) distance + 12 tiles and 6 turns. A smelting cell more than ~64 belt tiles from the bus is not worth a lone feeder belt: take the starter base's surplus with taps instead, or put the block at the ore.
+- **ORG-9**: With construction robots, robots build: one network over the base (logistic areas 50x50 must overlap to join; each roboport builds in 110x110), storage chests at the first roboport, the mall's chests made passive providers so robots take what ghosts need from the mall. The helper walks only to ghosts outside the network or lacking items, and to bootstrap.
 
 ## Scale
 
@@ -109,7 +112,10 @@ Inserters (items/s, wiki (chest to chest, hand size 1)): burner-inserter 0.79, i
 | logistic-science-pack | 75 | 5 | automation-science-pack | logistic-science-pack |
 | steel-processing | 50 | 5 | automation-science-pack | steel-plate, steel-chest |
 | fast-inserter | 30 | 15 | automation-science-pack | fast-inserter |
+| gun-turret | 10 | 10 | automation-science-pack | gun-turret |
+| stone-wall | 10 | 10 | automation-science-pack | stone-wall |
 | military | 10 | 15 | automation-science-pack | submachine-gun, shotgun, shotgun-shell |
+| military-2 | 20 | 15 | automation-science-pack, logistic-science-pack | piercing-rounds-magazine, grenade |
 | automation-2 | 40 | 15 | automation-science-pack, logistic-science-pack | assembling-machine-2 |
 | advanced-material-processing | 75 | 30 | automation-science-pack, logistic-science-pack | steel-furnace |
 | electric-energy-distribution-1 | 120 | 30 | automation-science-pack, logistic-science-pack | medium-electric-pole, big-electric-pole, iron-stick |
@@ -124,10 +130,17 @@ Inserters (items/s, wiki (chest to chest, hand size 1)): burner-inserter 0.79, i
 | logistics-2 | 200 | 30 | automation-science-pack, logistic-science-pack | fast-transport-belt, fast-underground-belt, fast-splitter |
 | research-speed-1 | 100 | 30 | automation-science-pack, logistic-science-pack | - |
 | solar-energy | 250 | 30 | automation-science-pack, logistic-science-pack | solar-panel |
+| battery | 150 | 30 | automation-science-pack, logistic-science-pack | battery |
+| advanced-oil-processing | 75 | 30 | automation-science-pack, logistic-science-pack, chemical-science-pack | advanced-oil-processing, heavy-oil-cracking, light-oil-cracking |
+| lubricant | 50 | 30 | automation-science-pack, logistic-science-pack, chemical-science-pack | lubricant |
+| electric-engine | 50 | 30 | automation-science-pack, logistic-science-pack, chemical-science-pack | electric-engine-unit |
+| robotics | 75 | 30 | automation-science-pack, logistic-science-pack, chemical-science-pack | flying-robot-frame |
+| construction-robotics | 100 | 30 | automation-science-pack, logistic-science-pack, chemical-science-pack | roboport, passive-provider-chest, storage-chest, construction-robot |
+| logistic-robotics | 250 | 30 | automation-science-pack, logistic-science-pack, chemical-science-pack | roboport, passive-provider-chest, storage-chest, logistic-robot |
 
 Trigger techs: steam-power: 50 iron plates made (smelted plates count); electronics: 10 copper plates made; automation-science-pack: one lab crafted by a PLAYER (a lab the helper crafts does not count); oil-processing: a pumpjack mining crude oil; steel-axe: 50 steel plates made.
 
-Default order (c): automation, electric-mining-drill, logistics, logistic-science-pack, steel-processing, fast-inserter, automation-2, advanced-material-processing, electric-energy-distribution-1, engine, toolbelt, logistics-2, research-speed-1, fluid-handling, oil-gathering, plastics, sulfur-processing, advanced-circuit, chemical-science-pack, solar-energy.
+Default order (c): automation, electric-mining-drill, logistics, logistic-science-pack, steel-processing, fast-inserter, military, automation-2, military-2, advanced-material-processing, electric-energy-distribution-1, engine, toolbelt, logistics-2, research-speed-1, fluid-handling, oil-gathering, plastics, sulfur-processing, advanced-circuit, chemical-science-pack, battery, advanced-oil-processing, lubricant, electric-engine, robotics, construction-robotics, logistic-robotics, solar-energy.
 
 ## Scale (c)
 
@@ -153,7 +166,7 @@ Labs: labs = spm * unit_s / 60 per colour (30 s techs: 1 lab eats 2 packs/min).
 - Grid 32 tiles; 3 tiles between blocks at least (6-10 preferred); a 2-tile gap after every 4 bus belts.
 - Bus lanes: iron-plate x4, copper-plate x4, gap x2, electronic-circuit x2, steel-plate x1, stone-brick x1, gap x2, iron-gear-wheel x1, coal x1, plastic-bar x1, advanced-circuit x1, sulfur x1.
 - Smelting column: 11 tiles wide, 2 tiles per furnace pair, at most 12 pairs per yellow ore lane.
-- Mall v1 zone 64 x 12: transport-belt, burner-inserter, inserter, pipe, electric-mining-drill, assembling-machine-1, iron-gear-wheel, electronic-circuit; output chests limited to 2 stacks. Later: underground-belt (after logistics), splitter (after logistics), steam-engine (after steam-power). Not in v1: small-electric-pole (needs wood); lab (needs a belt input the row does not carry); boiler (needs stone furnaces); stone-furnace (needs stone).
+- Mall v1 zone 64 x 12: transport-belt, burner-inserter, inserter, pipe, electric-mining-drill, assembling-machine-1, iron-gear-wheel, electronic-circuit; output chests limited to 2 stacks. Later: underground-belt (after logistics), splitter (after logistics), steam-engine (after steam-power), firearm-magazine (after gun-turret). Not in v1: small-electric-pole (needs wood); lab (needs a belt input the row does not carry); boiler (needs stone furnaces); stone-furnace (needs stone).
 
 ## Getting materials (helper)
 
@@ -175,3 +188,4 @@ Hand-craft: at most 60 s per job and 120 s per 10 game minutes once a mall exist
 | G8 | science at 60/min | G6, G2 | round 2 |
 | G9 | oil processing and plastic | G5 | round 3 |
 | G10 | blue science (sulfur, engines, advanced circuits) | G9 | round 4 |
+| G11 | robot network (construction robots build the ghosts) | G10 | round 5 |

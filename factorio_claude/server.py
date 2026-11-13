@@ -96,7 +96,8 @@ def factorio_production(window: str = "10m", items: list[str] | None = None, lim
 def factorio_defense(threats: bool = True, radius: float = 400) -> str:
     """Defence: recent biter attacks (where, what was lost, how long ago, turrets near), how many gun turrets exist
     and how many are low on ammo, whether gun turrets are researched; threats=True adds the nests within `radius`
-    with the pollution at each (pollution reaching a nest is what sends attacks) and the base's nearest part to it.
+    with the pollution at each (pollution reaching a nest is what sends attacks), `cloud` = chunks to the nearest
+    polluted chunk (the cloud reaches it as the base grows) and the base's nearest part to it.
     The mod itself alerts, rebuilds what biters destroy and keeps turrets in ammo; place turret groups with
     factorio_defend."""
     try:
@@ -113,7 +114,7 @@ def factorio_defend(x: float, y: float, toward_x: float | None = None, toward_y:
                     n: int = 4) -> str:
     """Place n (1-8) gun-turret ghosts in a row 6 tiles out from x,y toward toward_x,toward_y (an attack spot or a
     nest), on free ground; the helper builds them and fills them with firearm magazines. Needs gun turrets
-    researched."""
+    researched; once Stone wall is researched a short wall arc goes in front of them (only when it has no gap)."""
     return _call("defense_place_turrets", x=x, y=y, toward_x=toward_x, toward_y=toward_y, n=max(1, min(8, int(n))),
                  plan="defense-chat")
 

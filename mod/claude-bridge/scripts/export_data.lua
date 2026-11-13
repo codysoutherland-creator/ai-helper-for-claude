@@ -154,6 +154,15 @@ local function entity_data(p)
     local s = try(p.get_pumping_speed)
     d.pumping_speed_per_s = s and s * 60 or nil
   end
+  if p.type == "radar" then     -- (radar network: the planner spaces radars by the area each keeps charted)
+    -- (2.1: quality-dependent getters; the plain keys of 1.1 / the prototype docs throw)
+    d.max_distance_of_sector_revealed = try(p.get_max_distance_of_sector_revealed, "normal")
+    d.max_distance_of_nearby_sector_revealed = try(p.get_max_distance_of_nearby_sector_revealed, "normal")
+  end
+  if p.type == "roboport" then  -- (robot network: the planner tiles roboports by their logistic / construction areas)
+    d.logistic_radius = num(attr(p, "logistic_radius") or try(p.get_logistic_radius, "normal"))
+    d.construction_radius = num(attr(p, "construction_radius") or try(p.get_construction_radius, "normal"))
+  end
   if p.type == "boiler" then d.target_temperature = attr(p, "target_temperature") end
   if p.type == "generator" or p.type == "fusion-generator" then
     local u = try(p.get_fluid_usage_per_tick)

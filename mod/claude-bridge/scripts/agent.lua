@@ -784,6 +784,31 @@ local function place_item(ghost_name)
   return it.name, it.count or 1
 end
 
+-- round 5 (robot network, roadmap G11): a ghost the construction robots will build - inside the construction area of
+-- a logistic network that has construction robots (idle or busy: busy ones come to it next, and the helper walking
+-- there meanwhile would only race them), with the item it needs in that network's storage / provider chests, and no
+-- tree or rock in its footprint (robots do not clear those: the helper does). -> the network, or nil
+local function robots_cover(g)
+  if not (g and g.valid) then return nil end
+  local item, n = place_item(g.ghost_name)
+  if not item then return nil end
+  local ok, nets = pcall(g.surface.find_logistic_networks_by_construction_area, g.position, g.force)
+  if not ok or not nets then return nil end
+  for _, net in pairs(nets) do
+    if net.valid and (net.all_construction_robots or 0) > 0 then
+      local okc, have = pcall(net.get_item_count, item)
+      if okc and (have or 0) >= n then
+        local b = g.bounding_box
+        local blocked = g.surface.find_entities_filtered{area = {{b.left_top.x + 0.05, b.left_top.y + 0.05},
+          {b.right_bottom.x - 0.05, b.right_bottom.y - 0.05}}, type = {"tree", "simple-entity"}, limit = 1}[1]
+        if not blocked then return net end
+      end
+    end
+  end
+  return nil
+end
+agent.robots_cover = robots_cover
+
 local char_cats
 local function handcraftable(recipe)
   if not (recipe and recipe.enabled and not recipe.hidden) then return false end
@@ -1099,10 +1124,13 @@ end
 -- Records an undo log so a failed branch leaves nothing half-planned.
 -- extra: {{x, y}, ...} chests that come first whatever their distance (a plan's coal chests for its fuel round).
 -- opts.allow_craft: a bootstrap job (Automation's red packs): crafting is always allowed.
+-- opts.prefer_mall: with allow_craft, still wait at a working mall machine first (turret ammo: the mall makes it, a
+-- hand-craft only when no mall machine does)
 local function new_planner(c, center, player, extra, opts)
   opts = opts or {}
   local P = {tasks = {}, missing = {}, undo = {}, summary = {}, miss_n = 0, smelters = {}, spots = {}, used_f = {},
-    refused = {}, craft_s = 0, job_total = 0, allow_craft = opts.allow_craft, fuel = opts.fuel}
+    refused = {}, craft_s = 0, job_total = 0, allow_craft = opts.allow_craft, fuel = opts.fuel,
+    prefer_mall = opts.prefer_mall}
   local avail, srcs, first, seen = {}, {}, {}, {}
   local mall_c, mall_m = mall_sets()
   for _, p in ipairs(extra or {}) do
@@ -1239,7 +1267,7 @@ local function new_planner(c, center, player, extra, opts)
     end
     -- a working mall machine makes it: wait there and collect instead of crafting
     local mk = makers[item]
-    if mk and mk.valid and not P.allow_craft then
+    if mk and mk.valid and (not P.allow_craft or P.prefer_mall) then
       add(tag({type = "wait_collect", x = mk.position.x, y = mk.position.y, name = mk.name, item = item, count = n,
         max_wait = WAIT_COLLECT_TICKS}, top, "wait", n), "wait for " .. n .. " " .. item .. " at the mall")
       return true
@@ -1553,11 +1581,15 @@ agent.ghost_of_plan = ghost_of_plan
 -- the materials, then re-queues itself. fuel = put a few coal into each new burner when the helper carries some.
 -- Stops when no ghosts are left, after 3 rounds without progress (then reports what's missing), or when 2 build
 -- rounds in a row leave every ghost standing (something blocks them).
+-- Round 5 (robot network): ghosts the construction robots will build (robots_cover) are left to them - the helper
+-- walks only to the others (outside the network, items the network lacks, trees in the way); no_robots = build those
+-- too (the autopilot's R6 when the robots made no progress on them for a while).
 function tasks.build_ghosts(a, t)
   local c = a.entity
   local center = t.x and {x = t.x, y = t.y} or c.position
   local radius = t.radius or 32
   local ghosts = {}
+  local to_robots = 0
   for _, g in pairs(c.surface.find_entities_filtered{position = center, radius = radius, type = "entity-ghost", force = c.force}) do
     if g.quality.name == "normal" and place_item(g.ghost_name) and ghost_of_plan(g, t.plan) then
       -- a ghost over something marked for deconstruction (an in-place swap: the electric drill over its burner
@@ -1569,8 +1601,19 @@ function tasks.build_ghosts(a, t)
           {b.right_bottom.x - 0.1, b.right_bottom.y - 0.1}}, force = c.force}) do
         if f.type ~= "entity-ghost" and f.to_be_deconstructed() then waits = true; break end
       end
-      if not waits then ghosts[#ghosts + 1] = g end
+      if waits then
+        -- (built after the dismantling)
+      elseif not t.no_robots and robots_cover(g) then
+        to_robots = to_robots + 1
+      else
+        ghosts[#ghosts + 1] = g
+      end
     end
+  end
+  if to_robots > 0 and #ghosts == 0 then
+    alog(a, "left " .. to_robots .. " ghost" .. (to_robots == 1 and "" or "s") .. " to the construction robots" ..
+      ((t.built or 0) > 0 and (" (built " .. t.built .. ")") or ""))
+    return "done"
   end
   -- order = {{x0, y0, x1, y1}, ...}: an approved plan's sites in its build order; this round only handles the first
   -- site that still has ghosts (gather for it, build it, then the next one: the first machines run sooner)
@@ -1633,7 +1676,7 @@ function tasks.build_ghosts(a, t)
   local nxt = {type = "build_ghosts", x = center.x, y = center.y, radius = radius, player = t.player, built = built,
     stall = t.stall or 0, left = #ghosts, blocked = blocked, plan = t.plan, fuel = t.fuel, coal_from = t.coal_from,
     order = t.order, skip_boxes = t.skip_boxes, fuel_try = t.fuel_try, fuel_at = t.fuel_at, cur_box = box_i,
-    take_from = t.take_from, stashes = t.stashes}
+    take_from = t.take_from, stashes = t.stashes, no_robots = t.no_robots}
   local site_key = box_i or 0
   local sub, used, need, rank, cleared = {}, {}, {}, {}, {}
   for i = 1, math.min(#ghosts, ROUND_GHOSTS) do
@@ -2222,8 +2265,9 @@ function tasks.give_all(a, t)
   return "done"
 end
 
--- {type="acquire", item, count, bootstrap?, x?, y?}: get `count` of `item` into the helper's inventory with the material
--- planner (ACQ_ORDER), then continue. bootstrap = a hand-craft the doctrine always allows (Automation's 10 red packs).
+-- {type="acquire", item, count, bootstrap?, prefer_mall?, x?, y?}: get `count` of `item` into the helper's inventory with
+-- the material planner (ACQ_ORDER), then continue. bootstrap = a hand-craft the doctrine always allows (Automation's 10
+-- red packs); prefer_mall = wait at a working mall machine before that hand-craft.
 function tasks.acquire(a, t)
   local c = a.entity
   local have = c.get_item_count(t.item)
@@ -2234,7 +2278,7 @@ function tasks.acquire(a, t)
   end
   local player = t.player and game.get_player(t.player) or nil
   local P = new_planner(c, t.x and {x = t.x, y = t.y} or c.position, player, t.take_from,
-    {allow_craft = t.bootstrap})
+    {allow_craft = t.bootstrap, prefer_mall = t.prefer_mall})
   if not P.acquire(t.item, (t.count or 1) - have, 0) then
     return nil, "can't get " .. t.item .. (next(P.missing) and (" (" .. missing_text(P.missing) .. ")") or "")
   end
@@ -2249,7 +2293,9 @@ end
 
 -- {type="rearm", x?, y?, radius?, fill=25, low=10, ammo="firearm-magazine"}: top up gun turrets holding fewer than
 -- `low` magazines to `fill`, nearest first (every turret of the force when no x/y). Magazines come from the helper's
--- inventory, else one acquire (chests, then crafting: defence is always allowed to hand-craft its ammo).
+-- inventory, else one acquire: the mall's magazine chest first (defence v2: the mall makes them once Gun turrets is
+-- researched), then other chests, then waiting at the working mall machine; a hand-craft only when none of that has them
+-- (defence is always allowed to hand-craft its ammo).
 local AMMO_TURRETS = {"ammo-turret"}
 
 local function ammo_count(e, ammo)
@@ -2280,7 +2326,8 @@ function tasks.rearm(a, t)
     end
     t.fetched = true
     table.insert(a.queue, 1, t)
-    table.insert(a.queue, 1, {type = "acquire", item = ammo, count = math.min(t.need, 200), bootstrap = true, soft = true})
+    table.insert(a.queue, 1, {type = "acquire", item = ammo, count = math.min(t.need, 200), bootstrap = true,
+      prefer_mall = true, soft = true})
     t.requeued = true
     return "done"
   end
@@ -2705,7 +2752,8 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id, opts)
     -- and everything else of the stage first (its boilers, engines and poles: round 2 run, S4's electric drills
     -- stood without power for 20 game minutes because the old burners went before the new steam units were built)
     list[#list + 1] = {type = "build_ghosts", x = cx, y = cy, radius = radius, player = pi, plan = plan_id,
-      fuel = true, coal_from = coal_from, order = pl.build_order, take_from = pl.take_from}
+      fuel = true, coal_from = coal_from, order = pl.build_order, take_from = pl.take_from,
+      no_robots = opts and opts.no_robots or nil}
     list[#list + 1] = {type = "dismantle", plan = plan_id}
   end
   -- S0 repairs: the listed existing burners get fuel before anything new is built
@@ -2719,7 +2767,7 @@ function agent.work_area(player, bb, what, label, fuel_at, plan_id, opts)
     list[#list + 1] = {type = "build_ghosts", x = cx, y = cy, radius = radius, player = pi, plan = plan_id,
       fuel = plan_id and true or nil, coal_from = coal_from, order = pl and pl.build_order or nil,
       fuel_at = (pl and pl.build_order and fuel_at and #fuel_at > 0) and fuel_at or nil,
-      take_from = pl and pl.take_from or nil}
+      take_from = pl and pl.take_from or nil, no_robots = opts and opts.no_robots or nil}
   end
   local hand = fuel_at and #fuel_at > 0
   -- primed entries (r[4]) are planner v3 coal-field burners: started and restarted, not hand-fed

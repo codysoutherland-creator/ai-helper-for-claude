@@ -1260,7 +1260,7 @@ api.register("plan_helper", function(args)
   if not p.bbox then error("plan has no entities") end
   local player = args.player and util.get_player(args) or nil
   return {msg = agent.work_area(player, p.bbox, what, p.title, plans.fuel_at(p), p.id,
-    {autopilot = args.autopilot and true or nil})}
+    {autopilot = args.autopilot and true or nil, no_robots = args.no_robots and true or nil})}
 end)
 
 -- one-line description of an apply result (GUI / chat)

@@ -1,5 +1,5 @@
 """The autopilot's deterministic part (AUTOPILOT.md 4.2-4.6): the Snapshot it observes, goal status, the Director's
-rules R0-R9 and progress / stuck tracking. Pure functions on plain data: no link, no Claude, unit-tested
+rules R0-R12 and progress / stuck tracking. Pure functions on plain data: no link, no Claude, unit-tested
 (tests/test_autopilot.py). autopilot.py runs them in the loop and executes what they return.
 
     snap = Snapshot.from_observe(link.call("autopilot_observe"), masters)
@@ -35,23 +35,68 @@ REVERIFY_MIN = 10.0
 DEFEND_WINDOW_MIN = 30.0        # an attack this recent with no turret near it gets a turret group
 DEFEND_COOLDOWN_MIN = 15.0      # one group per spot per 15 game minutes
 THREAT_EVERY_MIN = 10.0         # nests the pollution reaches are re-read this often
+# defence v2 (doctrine RES-5)
+DEFENSE_TECHS = ("gun-turret", "stone-wall")    # researched before the first attack (with enemies on the map)
+NEST_NEAR_TILES = 160           # a nest within 5 chunks of the base's buildings: defence research at once
+DEFEND_RESEARCH_HOLD_MIN = 5.0
+WALLS_EVERY_MIN = 5.0           # turret groups without a wall arc are walled (2 per check)
+THREAT_GROUPS_MAX = 2           # turret groups placed per threats check (the helper builds and arms each)
+FORECAST_CHUNKS = 1             # a nest this many chunks outside the pollution cloud is defended before it reaches it
+FORECAST_GROWING = 1            # ... one chunk more while the cloud grows,
+FORECAST_FAST = 0.02            # ... and one more while it grows by more than 2% a minute
+FORECAST_TILES_PER_CHUNK = 32.0  # ranking: each chunk the cloud still has to spread counts like 32 tiles farther away
+# radar network (R11)
+RADAR_TECH = "radar"            # 2.1: the radar recipe is locked behind it (20 red packs; data export, not 1.1's free radar)
+RADAR_KW = 300.0                # what one radar draws, all the time
+RADAR_HEADROOM = 0.8            # a radar only while the load with it stays under 80% of capacity (R8 grows at 90%)
+RADAR_SPAN = 192                # one more radar per 192 tiles of the master's span (its bounding box's longer side)
+RADAR_MAX = 6
+RADAR_RETRY_MIN = 20.0
+RADAR_RESEARCH_HOLD_MIN = 10.0
+RADAR_FULL = "of a radar already"   # the planner's error: no edge spot is far enough from the radars there are
+RADAR_REGROW = 32.0             # ... the exploring radar is tried again once the master's span grew by this much
+RECHART_MIN = 8                 # charted chunks grown by this many (and RECHART_SHARE): expansions that found nothing
+RECHART_SHARE = 0.1             # on the charted map are tried again
+# robot network (R12, roadmap G11)
+ROBOT_TECH = "construction-robotics"
+ROBOTS_PER_PORT = 25            # construction robots the network should have per roboport (one batch of seeds at most
+ROBOTS_MIN, ROBOTS_MAX = 20, 200   # SEED_BATCH: the robot mall keeps 50 in its chest)
+SEED_BATCH = 50
+SEED_COOLDOWN_MIN = 5.0
+LOGISTIC_ROBOTS = 20            # logistic robots once Logistic robotics is researched (after the construction robots)
+LOGISTIC_CHESTS_MIN = 10.0      # mall chests inside the logistic area marked for upgrade at most this often
+ROBOPORTS_RETRY_MIN = 15.0
+ROBOT_STALL_MIN = 5.0           # a plan whose ghosts are all the robots' and none went in this long: the helper builds
+# expansion template -> the resource it failed to find on the charted map (its error says so: radar explores for it)
+EXPLORE_FOR = {"oil": "crude-oil", "iron_grow": "iron-ore", "copper_grow": "copper-ore"}
+# (the grow templates' bus fallback says "no iron or copper ore patch in reach")
+EXPLORE_ERR = re.compile(r"no crude oil|charted|patch with room|no [a-z -]+ patch")
 RED = "automation-science-pack"
 # roadmap template -> planner/expand.py template (the others are the starter base's or research's)
 EXPAND = {"mall": "mall", "power_grow": "power_grow", "steel_column": "steel", "science_block": "science",
-          "oil": "oil", "oil_plant": "oil_plant", "iron_grow": "iron_grow", "copper_grow": "copper_grow"}
+          "oil": "oil", "oil_plant": "oil_plant", "iron_grow": "iron_grow", "copper_grow": "copper_grow", "blue": "blue",
+          "robots": "robots"}
 # research an expansion template waits for (the mall's cells and machines include electric drills: round 3 moved the
 # mall up to the electric-drill stage, so its research is a gate)
-EXPAND_GATE = {"mall": ["automation", "electric-mining-drill", "logistics"], "power_grow": [], "steel": ["steel-processing"],
+EXPAND_GATE = {"mall": ["automation", "electric-mining-drill", "logistics"], "power_grow": [], "mall_add": [],
+               "steel": ["steel-processing"],
                "science": ["logistic-science-pack", "logistics"], "oil": ["oil-gathering", "fluid-handling"],
                "oil_plant": ["oil-processing", "plastics"], "iron_grow": ["electric-mining-drill"],
-               "copper_grow": ["electric-mining-drill"]}
+               "copper_grow": ["electric-mining-drill"], "radar": [RADAR_TECH],
+               # round 4: blue science (engines, advanced circuits, sulfur; the pack recipe last - all red + green)
+               "blue": ["engine", "advanced-circuit", "sulfur-processing", "chemical-science-pack"],
+               # round 5 (G11): the robot mall's recipes (Robotics and its chain are their prerequisites), the roboport
+               # grid R12 grows (roboports and storage chests: Construction robotics)
+               "robots": ["construction-robotics", "logistic-robotics"], "roboports": [ROBOT_TECH]}
 # plates per science pack (red: 1 copper + a gear; green: an inserter + a belt) - what a pack rate asks of the smelting
+# (blue: an engine - a steel plate of 5 iron, a gear, two pipes - and 1.5 advanced circuits - 3 green circuits, 6 cables)
 PLATES_PER = {"automation-science-pack": {"iron-plate": 2.0, "copper-plate": 1.0},
-              "logistic-science-pack": {"iron-plate": 5.5, "copper-plate": 1.5}}
+              "logistic-science-pack": {"iron-plate": 5.5, "copper-plate": 1.5},
+              "chemical-science-pack": {"iron-plate": 12.0, "copper-plate": 7.5}}
 TIGHT = 0.85                    # a plate used at >= 85% of what is made: nothing left over, the chain waits on it
 SLACK = 0.5                     # a plate used at < 50% of what is made: over-produced (it backs up; nothing breaks)
 GROW_COOLDOWN_MIN = 20.0        # one more smelting cell per plate per 20 game minutes
-SHIPPED_ROUND = 3               # roadmap goals of rounds <= this have a template the autopilot can build
+SHIPPED_ROUND = 5               # roadmap goals of rounds <= this have a template the autopilot can build (5: robots)
 NAME_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,63}$")
 PACKS = ("automation-science-pack", "logistic-science-pack", "military-science-pack", "chemical-science-pack")
@@ -82,7 +127,7 @@ def safe_id(v) -> str | None:
 @dataclass
 class Action:
     kind: str                   # research | bootstrap_packs | ask_lab | starter | adopt | next_stage | power_bridge
-    #                             | refuel | helper_restart | verify | wait | plateau
+    #                             | refuel | helper_restart | verify | wait | plateau | seed_robots | logistic_chests
     rule: str                   # R0..R9
     goal: str | None = None
     reason: str = ""
@@ -121,6 +166,10 @@ class Snapshot:
     enemies: dict = field(default_factory=dict)       # {peaceful, spawners}
     skipped: set = field(default_factory=set)         # stage plan ids the planner counts as built (Memory.skipped)
     defense: dict = field(default_factory=dict)       # defense.lua status: attacks, turrets, low_ammo, researched
+    chart: dict = field(default_factory=dict)         # {chunks: charted by the force, radars: built}
+    robots: dict = field(default_factory=dict)        # robot network (autopilot.lua robot_status): networks, roboports,
+    #                                                   construction / available / logistic robots, storage, ports,
+    #                                                   storages, upgradable mall chests, providers (passive providers)
 
     @classmethod
     def from_observe(cls, o: dict, masters: dict | None = None, power_gaps=None) -> "Snapshot":
@@ -141,7 +190,8 @@ class Snapshot:
                    census={k: int(v) for k, v in as_dict(o.get("census")).items() if safe_name(k)},
                    problems=as_dict(o.get("problems")), helper=as_dict(o.get("helper")),
                    plans=[as_dict(p) for p in as_list(o.get("plans"))], labs=as_list(o.get("labs")), ap=ap,
-                   masters=masters or {}, enemies=as_dict(o.get("enemies")), defense=as_dict(o.get("defense")))
+                   masters=masters or {}, enemies=as_dict(o.get("enemies")), defense=as_dict(o.get("defense")),
+                   chart=as_dict(o.get("chart")), robots=as_dict(o.get("robots")))
 
     # -- derived ----------------------------------------------------------------------------------------------------
     @property
@@ -309,6 +359,11 @@ def metric(snap: Snapshot, cond: dict) -> tuple[bool, float]:
         c = snap.census
         v = 18.75 * (c.get("stone-furnace", 0) + 2 * c.get("steel-furnace", 0) + 2 * c.get("electric-furnace", 0))
         return v >= cond.get("min", 0), v
+    if m == "robot_network":
+        # a roboport with construction robots in its network (the robot mall's robots put in by the helper)
+        r = snap.robots
+        v = float(r.get("construction") or 0) if int(r.get("roboports") or 0) >= cond.get("min_roboports", 1) else 0.0
+        return v >= cond.get("min_robots", 1), v
     if m == "mall_stocked":
         v = float(snap.ap.get("mall_stocked") if snap.ap.get("mall_stocked") is not None
                   else snap.ap.get("mall_chests") or 0)
@@ -405,6 +460,11 @@ class Memory:
     need_plate: str | None = None                     # VERIFY found this plate the bottleneck: one more smelting cell
     failed: dict = field(default_factory=dict)        # expansion template -> last error
     skipped: set = field(default_factory=set)         # stage plan ids the planner reports built (see master_progress)
+    charted_seen: int = 0                             # charted chunks when expansions were last retried (recharted)
+    radar_span: float = -1.0                          # the master's span when R11 last planned a radar
+    robot_wait: dict = field(default_factory=dict)    # plan id -> (game minute, ghosts) since its ghosts are all the
+    #                                                   robots' (R6 waits for them; ROBOT_STALL_MIN without one built:
+    #                                                   the helper builds them)
 
     def ready(self, key: str, now: float) -> bool:
         return self.cooldown.get(key, -1e9) <= now
@@ -435,10 +495,12 @@ class Director:
         another one wait (research, fuel, power poles, helper restarts and verification go on)."""
         self.goals = goals if goals is not None else goal_status(snap, mem.blocked)
         for rule in (self.r0_safety, self.r10_defense, self.r1c_research_clean, self.r1_research, self.r1b_bootstrap, self.r4_power,
-                     self.r5_fuel, self.r3_starter, self.r2_next_stage, self.r8_expand, self.r6_helper,
-                     self.r7_verify, self.r9_mall):
-            if planner_busy and rule in (self.r3_starter, self.r2_next_stage, self.r8_expand):
+                     self.r5_fuel, self.r3_starter, self.r2_next_stage, self.r8_expand, self.r11_radar,
+                     self.r12_robots, self.r6_helper, self.r7_verify, self.r9_mall):
+            if planner_busy and rule in (self.r3_starter, self.r2_next_stage, self.r8_expand, self.r11_radar):
                 continue
+            if planner_busy and rule == self.r12_robots:
+                rule = self.r12_robots_upkeep         # (the roboport expansion waits; seeding goes on)
             a = rule(snap, mem, goal)
             if a is not None:
                 return a
@@ -463,7 +525,8 @@ class Director:
         packs = snap.research_packs()
         needed = list(goal.get("techs", [])) if goal else []      # the current goal's techs, then the doctrine order
         techs = K.research_order(_GD(self.techs), researched=snap.research["done"], packs_made=packs,
-                                 needed=needed, limit=6, peaceful=snap.peaceful)
+                                 needed=needed, limit=6, peaceful=snap.peaceful,
+                                 defend=not snap.peaceful and RED in snap.automated_packs())
         techs = [t for t in techs if t != snap.research.get("current") and t not in snap.research.get("queue", [])]
         if not techs:
             return None
@@ -604,11 +667,37 @@ class Director:
         return Action("refuel", "R5", "G0", f"{snap.burners_out} burners out of fuel", {"at": spots[:4]},
                       "refuel burners")
 
-    # R6: the helper halted, or idle while an applied autopilot plan still has ghosts: restart its build
+    # R6: the helper halted, or idle while an applied autopilot plan still has ghosts: restart its build. Round 5: a plan
+    # whose ghosts are all ones the construction robots will build (plan row robot_ghosts: inside a network with robots
+    # and the items in it) is left to them while they make progress; ROBOT_STALL_MIN without one of its ghosts built
+    # (something the robots cannot do) the helper builds them after all (no_robots)
     def r6_helper(self, snap, mem, goal):
         h = snap.helper
-        building = [p for p in snap.plans if p.get("owner") == "autopilot" and p.get("status") == "applied"
-                    and int(p.get("ghosts") or 0) > 0]
+        building, stalled = [], []
+        for p in snap.plans:
+            if p.get("owner") != "autopilot" or p.get("status") != "applied" or int(p.get("ghosts") or 0) <= 0:
+                continue
+            n, robots = int(p.get("ghosts") or 0), int(p.get("robot_ghosts") or 0)
+            if robots < n:
+                mem.robot_wait.pop(p.get("id"), None)
+                building.append(p)
+                continue
+            since = mem.robot_wait.get(p.get("id"))
+            if since is None or n < since[1]:
+                mem.robot_wait[p.get("id")] = (snap.minute, n)       # the robots are on it (or just built one)
+            elif snap.minute - since[0] >= ROBOT_STALL_MIN:
+                stalled.append(p)
+        if stalled:
+            p = stalled[0]
+            key = f"helper:{p['id']}"
+            if mem.ready(key, snap.minute):
+                n = mem.bump(key)
+                mem.hold(key, snap.minute, 2)
+                mem.robot_wait[p["id"]] = (snap.minute, int(p.get("ghosts") or 0))
+                return Action("helper_restart", "R6", goal and goal["id"],
+                              f"the robots built none of {p.get('ghosts')} ghosts in {ROBOT_STALL_MIN:.0f} game "
+                              f"minutes: the helper builds them", {"plan": p["id"], "attempt": n, "no_robots": True},
+                              "build " + p["id"])
         if not building:
             mem.helper_idle_since = None
             return None
@@ -650,7 +739,7 @@ class Director:
             want = self.stage_rates.get(pid) or {}
             short = {}
             for item, rate in want.items():
-                if item in ("iron-plate", "copper-plate", "automation-science-pack", "logistic-science-pack") \
+                if item in ("iron-plate", "copper-plate") + tuple(PLATES_PER) \
                         and rate > 0 and snap.made.get(item, 0) < VERIFY_SHORT * rate:
                     short[item] = [round(snap.made.get(item, 0), 1), round(rate, 1)]
             cause = diagnose(snap) if short else None
@@ -692,6 +781,7 @@ class Director:
         m = snap.masters.get(mid) or {}
         have = m.get("templates") or {}
         goals = getattr(self, "goals", None) or goal_status(snap, mem.blocked)
+        recharted(snap, mem, goals)          # radar network: a template that found nothing charted may fit now
         by = {g["id"]: g for g in goals}
         order = [i for i in mem.goal_order if i in by] + [g["id"] for g in goals if g["id"] not in mem.goal_order]
         mp = master_progress(snap, mid)
@@ -712,6 +802,17 @@ class Director:
                           f"{plate} is the bottleneck ({b.get('made', 0):.0f}/min made, {b.get('used', 0):.0f} used): "
                           f"one more smelting cell", {"master": mid, "template": tpl, "after": mp["top_started"],
                                                       "attempt": n}, f"more {plate.split('-')[0]}")
+        add = mall_add_items(snap, m, mp)
+        key = "expand:mall_add:" + "+".join(add)
+        if add and mem.ready(key, snap.minute):
+            # defence v2: firearm magazines (and anything else researched after the mall was planned) into the mall
+            # row's free slots, so the helper takes them there instead of hand-crafting (tries per item set)
+            n = mem.bump(key)
+            mem.hold(key, snap.minute, EXPAND_RETRY_MIN)
+            if n <= EXPAND_TRIES:
+                return Action("expand", "R8", goal and goal["id"], f"the mall can make {', '.join(add)} now",
+                              {"master": mid, "template": "mall_add", "after": mp["top_started"], "attempt": n},
+                              "more mall items")
         for gid in order:
             g = by[gid]
             tpl = next_template(snap, g, have, mp, mem)
@@ -760,37 +861,240 @@ class Director:
             return None
         return tpl
 
+    # R11: the radar network. A radar next to the hub once the base has power, then one more on the base's edge as the
+    # master grows (radars_wanted: one per RADAR_SPAN tiles of its span) and one more while an expansion found nothing
+    # on the charted map (crude oil, an ore patch with room: explore_targets; the planner points it that way). The
+    # Radar tech first (2.1 locks the recipe: queued at the end, once red science runs). Bounded by power: each radar
+    # draws RADAR_KW all the time, so one only while the load with it stays under RADAR_HEADROOM of capacity; an
+    # exploring radar that does not fit asks for power growth (R8), a growth radar just waits.
+    def r11_radar(self, snap, mem, goal):
+        mid = active_master(snap)
+        if not mid:
+            return None
+        cap = float(snap.power.get("capacity_kw") or 0)
+        if cap <= 0:
+            return None                              # no power yet: nothing would run it
+        m = snap.masters.get(mid) or {}
+        mp = master_progress(snap, mid)
+        rad = as_dict(m.get("radar"))
+        have = max(int(rad.get("n") or 0), int(snap.census.get("radar", 0)))
+        toward = explore_targets(mem)
+        span = float(rad.get("span") or 0)
+        if toward and RADAR_FULL in str(mem.failed.get("radar") or "") and span < mem.radar_span + RADAR_REGROW:
+            # review: on a starter-sized base no edge spot is radar_spacing from the hub radar; the exploring radar
+            # was retried (and asked R8 for power) every hour without a spot ever existing. It waits for the base
+            # to grow (its edge moves out) instead
+            toward = []
+        want = radars_wanted(rad, toward)
+        if have >= want:
+            return None
+        if any(s.get("template") == "radar" and not (s.get("row") or {}).get("built") for s in mp["stages"]):
+            return None                              # the last radar is still being built
+        if not snap.done(RADAR_TECH):
+            cur = snap.research.get("current")
+            queue = ([cur] if cur else []) + [t for t in snap.research.get("queue", []) if t != cur]
+            if RADAR_TECH in queue or RED not in snap.automated_packs() or snap.labs_n() == 0 or \
+                    not mem.ready("radar_research", snap.minute) or not self._tech_ready(snap, RADAR_TECH):
+                return None
+            mem.hold("radar_research", snap.minute, RADAR_RESEARCH_HOLD_MIN)
+            return Action("research_set", "R11", goal and goal["id"], "a radar needs the Radar tech (2.1)",
+                          {"queue": (queue[:5] + [RADAR_TECH]), "removed": []}, "research radar")
+        use = snap.use_kw()
+        if use + RADAR_KW > RADAR_HEADROOM * cap:
+            if toward:
+                mem.need_power = True                # R8 grows power; the exploring radar comes after
+            return None
+        key = "expand:radar"
+        if not mem.ready(key, snap.minute):
+            return None
+        n = mem.bump(key)
+        if n > EXPAND_TRIES:
+            mem.attempts[key] = 0
+            mem.hold(key, snap.minute, 60)
+            return Action("note", "R11", goal and goal["id"],
+                          f"no spot for radar {have + 1} ({mem.failed.get('radar') or 'no room'})", {"why": "radar"},
+                          "radar does not fit")
+        mem.hold(key, snap.minute, RADAR_RETRY_MIN)
+        mem.radar_span = span
+        why =("the base has power: a radar at the hub" if have == 0 and not toward else
+               f"find {', '.join(t.replace('-', ' ') for t in toward)}: a radar toward it" if toward else
+               f"the base grew to {float(rad.get('span') or 0):.0f} tiles: radar {have + 1} on its edge")
+        return Action("expand", "R11", goal and goal["id"], why,
+                      {"master": mid, "template": "radar", "after": mp["top_started"], "attempt": n,
+                       "toward": toward, "headroom_kw": round(RADAR_HEADROOM * cap - use, 1)},
+                      "place a radar")
+
     # R10: defence. Not in a peaceful game. An attack in the last DEFEND_WINDOW_MIN with no turret near it: research gun
     # turrets first (in front of the queue), then place a turret group facing the attack. Without attacks, a nest the
     # pollution cloud already reaches gets a group on the base's side facing it (threats are re-read every
     # THREAT_EVERY_MIN). One group per spot per DEFEND_COOLDOWN_MIN.
+    # Defence v2 (doctrine RES-5): Gun turrets and Stone wall are researched before the first attack - once red
+    # science runs (after the tech being researched), at once (in front) when a nest is in the cloud or within
+    # NEST_NEAR_TILES of the base or biters attacked; turret groups get a wall arc once walls are researched (groups
+    # placed before that are walled later); the threats check also defends nests at the cloud's edge (rank_threats).
     def r10_defense(self, snap, mem, goal):
         d = snap.defense
-        if not d or d.get("peaceful") or snap.enemies.get("peaceful"):
+        if not d or d.get("peaceful") or snap.peaceful:      # (peaceful mode, or no nest on the map)
             return None
         recent = [as_dict(t) for t in as_list(d.get("attacks"))
                   if float(as_dict(t).get("age_s") or 1e9) <= DEFEND_WINDOW_MIN * 60 and
                   not int(as_dict(t).get("turrets_near") or 0)]
+        near = d.get("nest_dist")
+        urgent = (bool(recent) or int(d.get("polluted_nests") or 0) > 0 or
+                  (near is not None and float(near) <= NEST_NEAR_TILES))
+        red = RED in snap.automated_packs()
         if not d.get("researched"):
-            if recent and "gun-turret" not in snap.research.get("queue", []) and                     snap.research.get("current") != "gun-turret" and mem.ready("defend_research", snap.minute):
-                mem.hold("defend_research", snap.minute, 5)
-                queue = ["gun-turret"] + [t for t in ([snap.research.get("current")] + snap.research.get("queue", []))
-                                          if t and t != "gun-turret"]
-                return Action("research_set", "R10", "G0", "biters attacked and there are no turrets",
-                              {"queue": queue[:6], "removed": []}, "research gun turrets")
-            return None
+            return self._defense_research(snap, mem, urgent, red, recent)
         for t in recent:
             key = f"defend:{int(float(t['x']) // 24)}:{int(float(t['y']) // 24)}"
             if mem.ready(key, snap.minute):
                 mem.hold(key, snap.minute, DEFEND_COOLDOWN_MIN)
                 return Action("defend", "R10", "G0", f"biters destroyed a {t.get('what')} here",
-                              {"x": t["x"], "y": t["y"], "toward_x": t["x"], "toward_y": t["y"], "n": 4},
+                              {"x": t["x"], "y": t["y"], "toward_x": t["x"], "toward_y": t["y"], "n": 4,
+                               "walls": bool(d.get("walls_researched"))},
                               "turrets where biters attacked")
+        if not d.get("walls_researched"):
+            a = self._defense_research(snap, mem, urgent, red, recent)
+            if a is not None:
+                return a
+        groups = [as_dict(g) for g in as_list(d.get("unwalled")) if as_dict(g).get("x") is not None]
+        if d.get("walls_researched") and groups and mem.ready("walls", snap.minute):
+            mem.hold("walls", snap.minute, WALLS_EVERY_MIN)
+            return Action("defend_walls", "R10", "G0", f"{len(groups)} turret group(s) without a wall",
+                          {"groups": groups[:THREAT_GROUPS_MAX]}, "walls in front of the turrets")
         if mem.ready("threats", snap.minute):
             mem.hold("threats", snap.minute, THREAT_EVERY_MIN)
-            return Action("defend_threats", "R10", "G0", "check nests the pollution reaches", {},
+            return Action("defend_threats", "R10", "G0", "check nests the pollution reaches or is about to",
+                          {"trend": float(d.get("pollution_trend") or 0), "pollution": float(d.get("pollution") or 0),
+                           "max_groups": THREAT_GROUPS_MAX, "walls": bool(d.get("walls_researched"))},
                           "check nests near the base")
         return None
+
+    # R12: the robot network (roadmap G11, after blue science). Once the robot mall (G11's template, R8) is built: the
+    # roboport grid - roboports covering the master's built area with their construction areas, one network - grown a
+    # stage at a time while the masters summary counts built-area points no construction area reaches (repeatable: the
+    # base grows); the helper puts the robot mall's construction robots into a roboport (bootstrap: ROBOTS_PER_PORT per
+    # roboport), carries passive provider chests into a storage chest and marks the mall chests inside the logistic
+    # area for upgrade (the robots swap them: logistic chests replace hand-fetching), and later a few logistic robots.
+    def r12_robots(self, snap, mem, goal):
+        mid = active_master(snap)
+        if not mid or not snap.done(ROBOT_TECH):
+            return None
+        m = snap.masters.get(mid) or {}
+        mp = master_progress(snap, mid)
+        stages = mp["stages"]
+        mall_built = any(s.get("template") == "robots" and (s.get("row") or {}).get("built") for s in stages)
+        cov = as_dict(m.get("robots"))
+        building = any(s.get("template") == "roboports" and not (s.get("row") or {}).get("built") for s in stages)
+        if mall_built and (int(cov.get("uncovered") or 0) > 0 or int(cov.get("mall_out") or 0) > 0) and \
+                not building and \
+                all(snap.done(t) for t in EXPAND_GATE["roboports"]):
+            key = "expand:roboports"
+            if mem.ready(key, snap.minute):
+                n = mem.bump(key)
+                mem.hold(key, snap.minute, ROBOPORTS_RETRY_MIN)
+                if n > EXPAND_TRIES:                  # (no room: tried again in an hour, as R11's radar)
+                    mem.attempts[key] = 0
+                    mem.hold(key, snap.minute, 60)
+                    return Action("note", "R12", goal and goal["id"],
+                                  f"no room for more roboports ({mem.failed.get('roboports') or 'no spot'})",
+                                  {"why": "roboports"}, "roboports do not fit")
+                if n <= EXPAND_TRIES:
+                    first = int(cov.get("n") or 0) == 0
+                    return Action("expand", "R12", goal and goal["id"],
+                                  "the robot mall is built: the first roboport and storage chests by the hub" if first
+                                  else f"{cov.get('uncovered')} of {cov.get('points')} spots of the base outside the "
+                                       f"robots' construction areas, {cov.get('mall_out') or 0} mall chests outside "
+                                       f"the network: more roboports",
+                                  {"master": mid, "template": "roboports", "after": mp["top_started"], "attempt": n},
+                                  "plan roboports")
+        return self.r12_robots_upkeep(snap, mem, goal)
+
+    def r12_robots_upkeep(self, snap, mem, goal):
+        """R12's bootstrap carries and the mall chests' upgrade (no planner job: they go on while one runs)."""
+        r = snap.robots
+        if not r or not snap.done(ROBOT_TECH) or int(r.get("roboports") or 0) <= 0:
+            return None
+        stock = as_dict(snap.ap.get("mall_stock"))
+        ports = [as_list(p) for p in as_list(r.get("ports")) if len(as_list(p)) >= 2]
+        stores = [as_list(p) for p in as_list(r.get("storages")) if len(as_list(p)) >= 2]
+        have = int(r.get("construction") or 0)
+        want = max(ROBOTS_MIN, min(ROBOTS_MAX, ROBOTS_PER_PORT * int(r.get("roboports") or 0)))
+        if have < want and ports and float(stock.get("construction-robot") or 0) > 0 and \
+                mem.ready("seed:construction-robot", snap.minute):
+            mem.hold("seed:construction-robot", snap.minute, SEED_COOLDOWN_MIN)
+            n = int(min(SEED_BATCH, want - have, float(stock["construction-robot"])))
+            p = min(ports, key=lambda q: float(q[2]) if len(q) > 2 else 0.0)   # the emptiest roboport
+            return Action("seed_robots", "R12", goal and goal["id"],
+                          f"{have} construction robots in the network, {want} wanted: the helper brings {n} from the "
+                          f"robot mall", {"item": "construction-robot", "count": n, "x": p[0], "y": p[1],
+                                          "into": "roboport"}, "construction robots into a roboport")
+        upgradable, providers = int(r.get("upgradable") or 0), int(r.get("providers") or 0)
+        if upgradable > 0 and have > 0:
+            if providers < upgradable and stores and float(stock.get("passive-provider-chest") or 0) > 0 and \
+                    mem.ready("seed:passive-provider-chest", snap.minute):
+                mem.hold("seed:passive-provider-chest", snap.minute, SEED_COOLDOWN_MIN)
+                n = int(min(SEED_BATCH, upgradable - providers, float(stock["passive-provider-chest"])))
+                return Action("seed_robots", "R12", goal and goal["id"],
+                              f"{upgradable} mall chests in the logistic area: the helper brings {n} passive provider "
+                              f"chests to the robots' storage", {"item": "passive-provider-chest", "count": n,
+                                                                 "x": stores[0][0], "y": stores[0][1],
+                                                                 "into": "storage-chest"},
+                              "passive provider chests into storage")
+            if providers > 0 and mem.ready("logistic_chests", snap.minute):
+                mem.hold("logistic_chests", snap.minute, LOGISTIC_CHESTS_MIN)
+                return Action("logistic_chests", "R12", goal and goal["id"],
+                              f"{upgradable} mall chests in the logistic area become passive providers (the robots "
+                              f"take what ghosts need straight from the mall)", {"max": min(upgradable, providers)},
+                              "mall chests to passive providers")
+        logistic = int(r.get("logistic") or 0)
+        if snap.done("logistic-robotics") and have >= want and logistic < LOGISTIC_ROBOTS and ports and \
+                float(stock.get("logistic-robot") or 0) > 0 and mem.ready("seed:logistic-robot", snap.minute):
+            mem.hold("seed:logistic-robot", snap.minute, SEED_COOLDOWN_MIN)
+            n = int(min(LOGISTIC_ROBOTS - logistic, float(stock["logistic-robot"])))
+            return Action("seed_robots", "R12", goal and goal["id"], f"the helper brings {n} logistic robots",
+                          {"item": "logistic-robot", "count": n, "x": ports[0][0], "y": ports[0][1],
+                           "into": "roboport"}, "logistic robots into a roboport")
+        return None
+
+    def _defense_research(self, snap, mem, urgent, red, recent):
+        """Gun turrets / Stone wall into the research queue: in front when urgent (a nest near or polluted, an
+        attack), else right after the tech being researched once red science runs. None when queued already."""
+        if not (urgent or red) or not mem.ready("defend_research", snap.minute):
+            return None
+        d = snap.defense
+        have = {"gun-turret": bool(d.get("researched")), "stone-wall": bool(d.get("walls_researched"))}
+        want = [t for t in DEFENSE_TECHS if not have.get(t) and not snap.done(t) and self._tech_ready(snap, t)]
+        cur = snap.research.get("current")
+        queue = ([cur] if cur else []) + [t for t in snap.research.get("queue", []) if t != cur]
+        if not want:
+            return None
+        if urgent:
+            # Automation stays first while it runs on the 10 hand-made packs (R1b): in front of it the labs would
+            # spend those packs on the turrets and Automation would need another hand-made batch
+            pin = ["automation"] if "automation" in queue and not snap.done("automation") else []
+            if queue[:len(pin) + len(want)] == pin + want:
+                return None
+            new = pin + want + [t for t in queue if t not in want and t not in pin]
+        else:
+            if all(t in queue for t in want):
+                return None
+            new = queue[:1] + want + [t for t in queue[1:] if t not in want]
+        mem.hold("defend_research", snap.minute, DEFEND_RESEARCH_HOLD_MIN)
+        why = ("biters attacked and there are no turrets" if recent else
+               "a nest is near the base or in the pollution cloud" if urgent else
+               "red science runs: turrets and walls before the first attack")
+        return Action("research_set", "R10", "G0", why, {"queue": new[:6], "removed": []},
+                      "research " + " and ".join(t.replace("-", " ") for t in want))
+
+    def _tech_ready(self, snap, tech) -> bool:
+        """Its prerequisites are researched (unknown without the game's tech table: assume so)."""
+        t = self.techs.get(tech)
+        if not t:
+            return True
+        pre = t.get("prerequisites") or []
+        pre = list(pre.keys()) if isinstance(pre, dict) else list(pre)
+        return all(snap.done(p) for p in pre)
 
     # R9: the mall exists but the helper still hand-crafts a lot: name the items (the mall row's reserved slots get
     # them in the next mall extension; until then the share is reported, never hidden)
@@ -830,6 +1134,101 @@ def next_template(snap: Snapshot, g: dict, have: dict, mp: dict, mem: Memory) ->
             return None                  # a stage of this template is still being built: wait for it
         return tpl
     return None
+
+
+def mall_add_items(snap: Snapshot, m: dict, mp: dict) -> list:
+    """Items the active master's built mall could add now (masters summary "mall_addable": {item: tech}, the tech
+    researched), once the mall stage is built and no mall_add stage is still being built."""
+    addable = as_dict(m.get("mall_addable"))
+    if not addable or "mall" not in (m.get("templates") or {}):
+        return []
+    stages = mp.get("stages") or []
+    if not any(s.get("template") == "mall" and (s.get("row") or {}).get("built") for s in stages):
+        return []
+    if any(s.get("template") == "mall_add" and not (s.get("row") or {}).get("built") for s in stages):
+        return []
+    return sorted(i for i, t in addable.items() if snap.done(str(t)))
+
+
+def explore_targets(mem: Memory) -> list:
+    """Resources an expansion did not find on the charted map (mem.failed errors: no crude oil, no ore patch with
+    room): the next radar looks for them."""
+    return sorted({EXPLORE_FOR[t] for t, err in mem.failed.items() if t in EXPLORE_FOR and EXPLORE_ERR.search(str(err))})
+
+
+def radars_wanted(rad: dict, toward=()) -> int:
+    """Radars the base should have: one, one more per RADAR_SPAN tiles of the master's span (masters summary "radar":
+    {n, span}), one more while something has to be found; at most RADAR_MAX."""
+    span = float(as_dict(rad).get("span") or 0)
+    return min(RADAR_MAX, 1 + int(span // RADAR_SPAN) + (1 if toward else 0))
+
+
+def recharted(snap: Snapshot, mem: Memory, goals: list | None = None) -> list:
+    """Radar network: once the charted chunk count (observe "chart") grew by RECHART_MIN and RECHART_SHARE since the
+    last look, expansions that found nothing on the charted map get their tries back and their goals unblocked (R8
+    plans them again on the new map). -> the templates freed."""
+    n = int(as_dict(snap.chart).get("chunks") or 0)
+    if n <= 0:
+        return []
+    if mem.charted_seen <= 0:
+        mem.charted_seen = n
+        return []
+    if n - mem.charted_seen < max(RECHART_MIN, RECHART_SHARE * mem.charted_seen):
+        return []
+    mem.charted_seen = n
+    freed = [t for t, err in mem.failed.items() if t in EXPLORE_FOR and EXPLORE_ERR.search(str(err))]
+    for t in freed:
+        mem.failed.pop(t, None)
+        mem.attempts.pop(f"expand:{t}", None)
+        mem.cooldown.pop(f"expand:{t}", None)
+        for g in goals or ():
+            if any(EXPAND.get(name) == t for name in g.get("templates") or [g.get("template")]):
+                mem.blocked.pop(g["id"], None)
+    return freed
+
+
+def forecast_margin(trend: float, pollution: float = 0.0) -> int:
+    """Chunks outside the pollution cloud at which a nest is already defended (defence v2): FORECAST_CHUNKS, one more
+    while the cloud grows (trend: its total's change per game minute), one more while it grows by more than
+    FORECAST_FAST of its total a minute."""
+    m = FORECAST_CHUNKS
+    if trend > 0:
+        m += FORECAST_GROWING
+        if pollution > 0 and trend / pollution > FORECAST_FAST:
+            m += 1
+    return m
+
+
+def rank_threats(threats, trend: float = 0.0, pollution: float = 0.0, max_groups: int | None = None) -> list:
+    """Nests to put a turret group in front of (defense.lua defense_threats rows: x, y, pollution, cloud = chunks to
+    the nearest polluted chunk, base = the nearest building, dist): in the cloud, or within forecast_margin chunks of
+    it (the cloud reaches them as the base grows), with a building of the base near them. Nearest to the base first,
+    each chunk the cloud still has to spread counting FORECAST_TILES_PER_CHUNK tiles farther; one group per 24-tile
+    spot, at most max_groups. -> [{"nest": [x, y], "base": {x, y}, "cloud": chunks, "score"}]"""
+    margin = forecast_margin(trend, pollution)
+    cands = []
+    for t in as_list(threats):
+        t = as_dict(t)
+        base = as_dict(t.get("base"))
+        if base.get("x") is None or base.get("y") is None or t.get("x") is None:
+            continue
+        cloud = 0 if float(t.get("pollution") or 0) > 0 else t.get("cloud")
+        if cloud is None or int(cloud) > margin:
+            continue
+        dist = t.get("dist")
+        if dist is None:
+            dist = ((float(t["x"]) - float(base["x"])) ** 2 + (float(t["y"]) - float(base["y"])) ** 2) ** 0.5
+        cands.append({"nest": [float(t["x"]), float(t["y"])], "base": {"x": float(base["x"]), "y": float(base["y"])},
+                      "cloud": int(cloud), "score": float(dist) + FORECAST_TILES_PER_CHUNK * int(cloud)})
+    cands.sort(key=lambda c: c["score"])
+    out = []
+    for c in cands:
+        if max_groups is not None and len(out) >= max_groups:
+            break
+        if any(abs(o["base"]["x"] - c["base"]["x"]) < 24 and abs(o["base"]["y"] - c["base"]["y"]) < 24 for o in out):
+            continue
+        out.append(c)
+    return out
 
 
 def goal_actionable(snap: Snapshot, g: dict | None, masters_have: dict | None = None) -> bool:
@@ -993,5 +1392,7 @@ def prompt_snapshot(snap: Snapshot, goals: list | None = None) -> dict:
                        "queue": int(snap.helper.get("queue") or 0), "halted": bool(snap.helper.get("halted")),
                        "craft_s_10min": c.get("craft_s_10min"), "handcraft_share_1h": c.get("share_1h")},
             "plans": plans,
+            **({"robots": {k: int(snap.robots.get(k) or 0) for k in ("roboports", "construction", "logistic")}}
+               if snap.robots else {}),
             "goals": [{"id": g["id"], "done": g["done"], "ready": g["ready"], "shipped": g["available"]}
                       for g in (goals or [])]}

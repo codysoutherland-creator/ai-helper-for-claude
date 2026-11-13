@@ -1,4 +1,23 @@
 ---------------------------------------------------------------------------------------------------
+Version: 0.8.0
+Date: 2026-11-13
+  Features:
+    - The autopilot plans by material balance: it compares iron and copper plates made against plates used, finds the
+      plate holding science back, and adds a smelting cell for it after the electric drills are in.
+    - Defence before the first attack: gun turrets and stone walls are researched once red science runs on a map with
+      nests, sooner when a nest is near or polluted. The mall makes firearm magazines, turret groups get wall arcs,
+      and nests the pollution cloud is about to reach are defended first.
+    - Radar: once the Radar tech is in, a radar goes up at the hub, and more go on the edge as the base grows,
+      limited by the power available.
+    - Blue science: a block with sulfur, engines and advanced circuits off the bus, fed by the oil plant, plus chained
+      labs that research blue techs.
+    - Robots: batteries through to robotics, a robot mall (frames, construction robots, roboports, chests), a roboport
+      grid over the base, and the helper leaves ghosts inside a robot network to the construction robots.
+  Bugfixes:
+    - The helper can now tear down chests and belts in its way before their stage's other ghosts are built.
+    - Plates lying on the ground no longer count as obstacles when a stage is checked.
+    - The helper stops mining ore by hand when the plates it needs have already come in.
+---------------------------------------------------------------------------------------------------
 Version: 0.7.1
 Date: 2026-11-07
   Bugfixes:

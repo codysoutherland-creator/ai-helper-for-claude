@@ -2349,19 +2349,27 @@ def validate_stage(mp: MasterPlan, gd, world, k: int):
     return validate(stage_entities(mp, k), gd, world_without_master(world, mp, k), {"assume_research": True})
 
 
+# what the game may have turned a planned entity into without the planner: round 5's robot network marks the mall
+# chests inside its logistic area for upgrade to passive provider chests (autopilot.lua autopilot_logistic_chests)
+UPGRADED_FROM = {"passive-provider-chest": ("iron-chest", "steel-chest", "wooden-chest")}
+
+
 def world_without_master(world, mp: MasterPlan, k=None):
     """Copy of a World without the force entities (and ghosts) standing exactly where the master plan has the same
-    entity (earlier stages that are built already), and without the player's belt tiles the master cuts in stages
-    <= k (all cuts when k is None)."""
+    entity (earlier stages that are built already) - or one the game upgraded it to (UPGRADED_FROM) - and without the
+    player's belt tiles the master cuts in stages <= k (all cuts when k is None)."""
     mine = {(e.name, float(e.x), float(e.y)) for e in mp.ents}
     mine |= {(c["name"], float(c["x"]), float(c["y"])) for c in (mp.cuts or []) if k is None or c["stage"] <= k}
-    if not any(((e.name[6:] if e.name.startswith("ghost:") else e.name), float(e.x), float(e.y)) in mine
-               for e in world.entities):
+
+    def planned(e):
+        name = e.name[6:] if e.name.startswith("ghost:") else e.name
+        x, y = float(e.x), float(e.y)
+        return (name, x, y) in mine or any((n, x, y) in mine for n in UPGRADED_FROM.get(name, ()))
+    if not any(planned(e) for e in world.entities):
         return world
     keep, remap = [], {}
     for i, e in enumerate(world.entities):
-        name = e.name[6:] if e.name.startswith("ghost:") else e.name
-        if (name, float(e.x), float(e.y)) in mine:
+        if planned(e):
             continue
         remap[i] = len(keep)
         keep.append(e)

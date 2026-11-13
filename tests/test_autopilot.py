@@ -627,6 +627,74 @@ def test_r8_goes_on_to_oil_after_steel_then_the_plant():
     assert a.kind == "expand" and a.args["template"] == "oil_plant" and a.goal == "G9"
 
 
+BLUE_TECHS = ["engine", "advanced-circuit", "sulfur-processing", "chemical-science-pack"]
+
+
+def test_r8_goes_on_to_blue_science_after_the_oil_plant():
+    """G10 (round 4): once plastic flows (G9 done) the blue block waits for its research (engines, advanced circuits,
+    sulfur processing, the chemical science pack recipe: R1 queues them as the goal's techs), then R8 plans it; the
+    rate check (R7) blames the plate the blue packs use up."""
+    d = R.Director(techs=techs())
+    m = R.Memory()
+    _goals_done(m, "G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9")
+    masters = _grown(["mall", "steel", "science", "oil", "oil_plant"])
+    s = snap(masters=masters, done=ALL_RG + ["oil-processing", "plastics"])
+    d.goals = R.goal_status(s, m.blocked, m)
+    g10 = next(g for g in d.goals if g["id"] == "G10")
+    assert g10["available"] and g10["ready"] and not g10["done"]
+    assert R.current_goal(d.goals)["id"] == "G10" and set(BLUE_TECHS) <= set(g10["techs"])
+    assert d.r8_expand(s, m, None) is None                   # research first
+    s = snap(masters=masters, done=ALL_RG + ["oil-processing", "plastics"] + BLUE_TECHS)
+    d.goals = R.goal_status(s, m.blocked, m)
+    a = d.r8_expand(s, m, None)
+    assert a.kind == "expand" and a.args["template"] == "blue" and a.goal == "G10"
+    # built and making 10+ blue packs/min (two observations): G10 is done
+    s = snap(masters=_grown(["mall", "steel", "science", "oil", "oil_plant", "blue"]),
+             done=ALL_RG + ["oil-processing", "plastics"] + BLUE_TECHS, made={"chemical-science-pack": 12})
+    for _ in range(2):
+        gs = R.goal_status(s, m.blocked, m)
+    assert next(g for g in gs if g["id"] == "G10")["done"]
+    # each blue pack: 12 iron (steel included) and 7.5 copper
+    plates = R.Snapshot(made={"iron-plate": 200, "copper-plate": 120, "chemical-science-pack": 6},
+                        used={"iron-plate": 195, "copper-plate": 60})
+    bal = R.material_balance(plates, {"chemical-science-pack": 13.5})
+    assert bal["iron-plate"]["need"] == 162.0 and bal["iron-plate"]["tight"] and not bal["copper-plate"]["tight"]
+    assert R.bottleneck(plates, {"chemical-science-pack": [6, 13.5]}, {"chemical-science-pack": 13.5}) == "iron-plate"
+
+
+def test_roadmap_rates_are_items_the_mod_observes():
+    """Review round 4: G9 is done on a plastic rate, but the mod's observe did not count plastic bars - G9 never
+    finished in a real game and G10 (blue science) never opened. Every rate a goal is done on is in its ITEMS."""
+    import re
+    from pathlib import Path
+    from factorio_claude import knowledge as K
+    lua = (Path(__file__).resolve().parent.parent / "mod" / "claude-bridge" / "scripts" / "autopilot.lua").read_text(
+        encoding="utf-8")
+    body = re.search(r"local ITEMS = \{(.*?)\}", lua, re.S).group(1)
+    items = set(re.findall(r'"([a-z0-9-]+)"', body))
+    rates = {c["item"] for g in K.roadmap() for c in g["done"] if c.get("metric") == "rate"}
+    assert {"plastic-bar", "chemical-science-pack"} <= rates
+    assert rates <= items, sorted(rates - items)
+
+
+def test_plastic_rate_opens_blue_science_and_r1_queues_its_research():
+    """G9 done from the observed plastic rate (two observations, not latched by hand), then G10 is the goal and R1
+    queues its techs first (their prerequisites done: Plastics, Oil processing, Steel processing, green science)."""
+    d = R.Director(techs=techs())
+    m = R.Memory()
+    _goals_done(m, "G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8")
+    masters = _grown(["mall", "steel", "science", "oil", "oil_plant"])
+    done = ALL_RG + ["oil-processing", "plastics", "oil-gathering", "fluid-handling", "automation-2", "engine"]
+    s = snap(masters=masters, done=done, made={RED: 30, "logistic-science-pack": 30, "plastic-bar": 20})
+    for _ in range(2):
+        d.goals = R.goal_status(s, m.blocked, m)
+    assert next(g for g in d.goals if g["id"] == "G9")["done"]
+    goal = R.current_goal(d.goals)
+    assert goal["id"] == "G10"
+    a = d.r1_research(s, R.Memory(), goal)
+    assert a.kind == "research" and set(a.args["techs"][:2]) == {"advanced-circuit", "sulfur-processing"}, a.args
+
+
 def test_a_built_goal_with_nothing_left_is_watched_not_worked():
     """Round 3: G8 (60 science/min) stayed the current goal after its block was built and every red + green tech was
     researched; the stuck ladder then ran replan, restart, ask Claude and block goal on a finished base."""
@@ -639,11 +707,15 @@ def test_a_built_goal_with_nothing_left_is_watched_not_worked():
 
 
 def test_finished_base_says_done_once_and_never_climbs_the_ladder(tmp_path):
-    """Nothing left to build or research: one milestone saying so (and what the next goal would need), phase "done",
-    no stuck ladder, no review calls."""
-    masters = _grown(["mall", "steel", "science", "oil", "oil_plant"])
-    g = FakeGame(done=ALL_RG + ["oil-processing", "plastics"], made={RED: 30, "logistic-science-pack": 30,
-                                                                      "plastic-bar": 20, "steel-plate": 15})
+    """Nothing left to build or research: one milestone saying so, phase "done", no stuck ladder, no review calls.
+    (Round 5 ships G11, the roadmap's last goal: a finished base has the blue block and the robot network too.)"""
+    masters = _grown(["mall", "steel", "science", "oil", "oil_plant", "blue", "robots", "roboports"])
+    masters["m"]["robots"] = {"n": 4, "points": 200, "uncovered": 0}
+    g = FakeGame(done=ALL_RG + ["oil-processing", "plastics"] + BLUE_TECHS +
+                 ["battery", "advanced-oil-processing", "lubricant", "electric-engine", "robotics",
+                  "construction-robotics", "logistic-robotics"],
+                 made={RED: 30, "logistic-science-pack": 30, "plastic-bar": 20, "steel-plate": 15,
+                       "chemical-science-pack": 12})
     dec = FakeDecider()
     ap, clock = make(g, tmp_path, decider=dec)
     ap.masters_from = lambda plans: masters
@@ -652,12 +724,12 @@ def test_finished_base_says_done_once_and_never_climbs_the_ladder(tmp_path):
         clock.t += 400
         ap.tick()
         if minute == 0:      # (the first tick starts the epoch with a fresh memory) the goals were reached earlier
-            ap.mem.latched |= {"G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9"}
+            ap.mem.latched |= {"G0", "G1", "G2", "G3", "G4", "G5", "G6", "G7", "G8", "G9", "G10", "G11"}
             ap.director.r1_research = lambda *a: None       # every red + green tech researched
             g.queue.clear()
     assert not [r for r in journal(tmp_path) if r["kind"] == "stuck"]
     said = [m for m in g.milestones if m.startswith("Done")]
-    assert len(said) == 1 and "G10" in said[0]
+    assert len(said) == 1 and "every goal on the roadmap" in said[0]
     assert ap.phase == "done" and g.statuses[-1]["phase"] == "done"
     assert not any(r[0] == "review" for r in dec.asked)
 
@@ -720,7 +792,8 @@ def test_master_progress_offers_past_a_stage_being_built():
 
 
 def _defense_snap(**d):
-    base = {"peaceful": False, "researched": True, "attacks": [], "turrets": 0, "low_ammo": 0}
+    base = {"peaceful": False, "researched": True, "walls_researched": True, "attacks": [], "turrets": 0,
+            "low_ammo": 0}
     base.update(d)
     return R.Snapshot(tick=3600 * 100, defense=base, enemies={"peaceful": False, "spawners": 1})
 
@@ -746,6 +819,156 @@ def test_defense_quiet_in_a_peaceful_game_and_for_covered_or_old_attacks():
     snap = _defense_snap(attacks=[{"x": 1, "y": 1, "age_s": 60, "turrets_near": 3},
                                   {"x": 9, "y": 9, "age_s": 99999, "turrets_near": 0}])
     assert R.Director().r10_defense(snap, R.Memory(), None).kind == "defend_threats"
+
+
+# ---- defence v2: pre-emptive research, walls, ammo from the mall, the pollution forecast ------------------------------
+def _quiet(**d):
+    """Enemies on the map, no attack yet, turrets and walls not researched."""
+    s = _defense_snap(**dict({"researched": False, "walls_researched": False}, **d))
+    s.research = {"current": "logistics", "queue": ["logistics", "fast-inserter"], "done": set()}
+    return s
+
+
+def test_defense_research_is_preemptive_once_red_science_runs():
+    """Gun turrets were only researched after the first attack: now they and Stone wall come once red science is
+    automated, right after the tech being researched (doctrine RES-5)."""
+    s = _quiet()
+    assert R.Director().r10_defense(s, R.Memory(), None) is None          # no red science yet, no nest near
+    s.made = {RED: 6}
+    mem = R.Memory()
+    a = R.Director().r10_defense(s, mem, None)
+    assert a.kind == "research_set" and a.args["queue"] == ["logistics", "gun-turret", "stone-wall", "fast-inserter"]
+    assert R.Director().r10_defense(s, mem, None) is None                 # held (one change per 5 game minutes)
+    s.research["queue"] = a.args["queue"]
+    s.tick += 3600 * 10
+    assert R.Director().r10_defense(s, mem, None) is None                 # queued: nothing to change
+
+
+def test_defense_research_goes_first_when_a_nest_is_near_or_polluted():
+    for d in ({"nest_dist": 96}, {"polluted_nests": 1}):
+        a = R.Director().r10_defense(_quiet(**d), R.Memory(), None)
+        assert a.kind == "research_set" and a.args["queue"][:3] == ["gun-turret", "stone-wall", "logistics"], d
+    assert R.Director().r10_defense(_quiet(nest_dist=224), R.Memory(), None) is None     # far: waits for red
+
+
+def test_defense_research_never_jumps_ahead_of_bootstrap_automation():
+    """Review fix: an urgent defence queue put Gun turrets in front of Automation, whose 10 hand-made packs (R1b)
+    the labs would then spend on the turrets; Automation stays first, the turrets come right after it."""
+    s = _quiet(nest_dist=32)
+    s.research = {"current": "automation", "queue": ["automation", "logistics"], "done": set()}
+    mem = R.Memory()
+    a = R.Director().r10_defense(s, mem, None)
+    assert a.kind == "research_set" and a.args["queue"] == ["automation", "gun-turret", "stone-wall", "logistics"]
+    s.research["queue"] = a.args["queue"]
+    s.tick += 3600 * 10
+    assert R.Director().r10_defense(s, mem, None) is None                 # in place: no ping-pong
+    s.research = {"current": "logistics", "queue": ["logistics"], "done": {"automation"}}
+    assert R.Director().r10_defense(s, R.Memory(), None).args["queue"][:2] == ["gun-turret", "stone-wall"]
+
+
+def test_defense_research_never_in_a_peaceful_game_or_without_nests():
+    s = _quiet(nest_dist=32, peaceful=True)
+    s.made = {RED: 6}
+    assert R.Director().r10_defense(s, R.Memory(), None) is None
+    s = _quiet(nest_dist=32)
+    s.made = {RED: 6}
+    s.enemies = {"peaceful": False, "spawners": 0}
+    assert R.Director().r10_defense(s, R.Memory(), None) is None
+
+
+def test_defense_research_waits_for_its_prerequisite():
+    d = R.Director(techs=techs())
+    s = _quiet(nest_dist=32)
+    assert d.r10_defense(s, R.Memory(), None) is None                    # automation-science-pack not researched
+    s.research["done"] = {RED}
+    assert d.r10_defense(s, R.Memory(), None).args["queue"][:2] == ["gun-turret", "stone-wall"]
+
+
+def test_defense_walls_research_after_turrets_then_walls_for_old_groups():
+    s = _quiet(researched=True)
+    s.made = {RED: 6}
+    a = R.Director().r10_defense(s, R.Memory(), None)
+    assert a.kind == "research_set" and a.args["queue"] == ["logistics", "stone-wall", "fast-inserter"]
+    group = {"x": 40, "y": 8, "toward_x": 140, "toward_y": 8, "plan": "defense-1"}
+    s = _defense_snap(unwalled=[group])
+    mem = R.Memory()
+    a = R.Director().r10_defense(s, mem, None)
+    assert a.kind == "defend_walls" and a.args["groups"] == [group]
+    a = R.Director().r10_defense(s, mem, None)
+    assert a.kind == "defend_threats" and a.args["walls"] and a.args["max_groups"] == R.THREAT_GROUPS_MAX
+    # without walls researched the old groups wait (and turrets placed at an attack say so)
+    s = _defense_snap(walls_researched=False, unwalled=[group],
+                      attacks=[{"x": 100, "y": 48, "what": "transport-belt", "age_s": 60, "turrets_near": 0}])
+    a = R.Director().r10_defense(s, R.Memory(), None)
+    assert a.kind == "defend" and a.args["walls"] is False
+
+
+def _threat(x, y, bx, by, pollution=0.0, cloud=None):
+    return {"x": x, "y": y, "pollution": pollution, "cloud": cloud, "base": {"x": bx, "y": by},
+            "dist": int(((x - bx) ** 2 + (y - by) ** 2) ** 0.5)}
+
+
+def test_rank_threats_defends_nests_at_the_clouds_edge_nearest_first():
+    polluted = _threat(300, 0, 200, 0, pollution=3.0, cloud=0)          # 100 tiles out, in the cloud
+    edge = _threat(0, 150, 0, 90, cloud=1)                               # 60 tiles out, one chunk past the cloud
+    far_edge = _threat(-400, 0, -200, 0, cloud=2)                        # two chunks past the cloud
+    outside = _threat(0, -300, 0, -100, cloud=None)                      # no cloud within 4 chunks
+    no_base = {"x": 9, "y": 9, "pollution": 5.0, "cloud": 0}
+    ranked = R.rank_threats([polluted, edge, far_edge, outside, no_base])
+    assert [c["nest"] for c in ranked] == [[0, 150], [300, 0]]          # 60 + 32 before 100; 2 chunks out: not yet
+    assert ranked[0]["cloud"] == 1 and ranked[1]["cloud"] == 0
+    # a growing cloud reaches farther: one chunk more, and one more when it grows fast
+    assert R.forecast_margin(0) == 1 and R.forecast_margin(5.0, 1000) == 2 and R.forecast_margin(50.0, 1000) == 3
+    assert [c["nest"] for c in R.rank_threats([far_edge, polluted], trend=5.0, pollution=1000)][-1] == [-400, 0]
+    # bounded, one group per spot
+    twin = _threat(310, 10, 205, 5, pollution=2.0, cloud=0)
+    assert len(R.rank_threats([polluted, twin, edge], max_groups=5)) == 2
+    assert len(R.rank_threats([polluted, edge], max_groups=1)) == 1
+
+
+def test_defend_threats_places_ranked_groups_with_walls():
+    calls = []
+
+    def call(op, **kw):
+        calls.append((op, kw))
+        if op == "defense_threats":
+            return [_threat(300, 0, 200, 0, pollution=3.0, cloud=0), _threat(0, 150, 0, 90, cloud=1),
+                    _threat(0, -150, 0, -90, cloud=1)]
+        return {"placed": [{"x": 1, "y": 1}] * 4, "walls": 20}
+    ex = AP.Executor(call, journal=None)
+    a = R.Action("defend_threats", "R10", "G0", "", {"trend": 0, "max_groups": 2, "walls": True})
+    r = ex.do_defend_threats(a, R.Snapshot(tick=3600))
+    places = [kw for op, kw in calls if op == "defense_place_turrets"]
+    assert len(places) == 2 and r["groups"][0]["nest"] == [0, 150] and all(p["walls"] for p in places)
+    assert r["candidates"] == 3
+
+
+def test_defend_walls_calls_the_wall_op_per_group():
+    calls = []
+    ex = AP.Executor(lambda op, **kw: calls.append((op, kw)) or {"placed": [{"x": 0, "y": 0}]}, journal=None)
+    a = R.Action("defend_walls", "R10", "G0", "", {"groups": [{"x": 4, "y": 5, "toward_x": 90, "toward_y": 5,
+                                                              "plan": "defense-9"}]})
+    r = ex.do_defend_walls(a, R.Snapshot(tick=3600))
+    assert r["ok"] and calls[0][0] == "defense_place_walls" and calls[0][1]["group"] == "defense-9"
+
+
+def test_r8_adds_magazines_to_a_built_mall_once_turrets_are_researched():
+    d = R.Director(techs=techs())
+    built = {"status": "applied", "built": True}
+    mall = {"k": 6, "label": "S6", "plan": "m-s6", "gate": [], "template": "mall", "row": built}
+    masters = _master({k: built for k in range(6)}, templates={"mall": 6}, extra=[mall])
+    masters["m"]["mall_addable"] = {"firearm-magazine": "gun-turret", "fast-inserter": "fast-inserter"}
+    done = ["steam-power", "electronics", RED, "automation", "electric-mining-drill", "logistics"]
+    s = snap(masters=masters, done=done)
+    assert R.mall_add_items(s, masters["m"], R.master_progress(s, "m")) == []
+    s = snap(masters=masters, done=done + ["gun-turret"])
+    assert R.mall_add_items(s, masters["m"], R.master_progress(s, "m")) == ["firearm-magazine"]
+    a = d.r8_expand(s, R.Memory(), None)
+    assert a.kind == "expand" and a.args["template"] == "mall_add" and "firearm-magazine" in a.reason
+    # the mall stage still being built: wait
+    masters["m"]["stages"][-1]["row"] = {"status": "applied", "ghosts": 4}
+    s = snap(masters=masters, done=done + ["gun-turret"])
+    assert R.mall_add_items(s, masters["m"], R.master_progress(s, "m")) == []
 
 
 def test_r7_finds_the_plate_bottleneck_behind_short_science():
@@ -784,3 +1007,430 @@ def test_r8_grows_the_short_plate_after_the_electric_drills():
     s.used = {"iron-plate": 100}
     mp = {"stages": [st("electric", True)]}
     assert d.grow_template(s, m, mp) is None and m.need_plate is None    # not short any more
+
+
+# ---- radar network (R11) -----------------------------------------------------------------------------------------------
+def _radar_snap(radar=None, done=(), use_kw=0.0, cap_kw=1800, census=None, extra=(), chart=None, **kw):
+    built = {"status": "applied", "built": True}
+    masters = _master({k: built for k in range(6)}, extra=list(extra))
+    masters["m"]["radar"] = radar if radar is not None else {"n": 0, "span": 120}
+    s = snap(masters=masters, done=["steam-power", "electronics", RED, "automation"] + list(done),
+             made=kw.pop("made", {RED: 10}), **kw)
+    s.power = {"capacity_kw": cap_kw, "networks": [{"use_kw": use_kw}], "low_power": 0, "no_power": 0}
+    s.census.update(census or {})
+    s.chart = chart or {}
+    return s
+
+
+def test_r11_researches_radar_then_places_one_at_the_hub():
+    """2.1 locks the radar recipe behind the Radar tech (data export): queued at the end once red science runs, then
+    the first radar once the base has power."""
+    d = R.Director(techs=techs())
+    assert techs()["radar"]["prerequisites"] == [RED]
+    a = d.r11_radar(_radar_snap(current="logistics", queue=["steel-processing"]), R.Memory(), None)
+    assert a.kind == "research_set" and a.rule == "R11" and a.args["queue"] == ["logistics", "steel-processing",
+                                                                                   "radar"]
+    # queued already, or no red science yet: nothing
+    assert d.r11_radar(_radar_snap(current="radar"), R.Memory(), None) is None
+    assert d.r11_radar(_radar_snap(made={}), R.Memory(), None) is None
+    # researched: the first radar
+    a = d.r11_radar(_radar_snap(done=["radar"]), R.Memory(), None)
+    assert a.kind == "expand" and a.args["template"] == "radar" and a.args["toward"] == [] and "hub" in a.reason
+    # no power: no radar
+    assert d.r11_radar(_radar_snap(done=["radar"], cap_kw=0), R.Memory(), None) is None
+
+
+def test_r11_more_radars_as_the_base_grows_and_one_at_a_time():
+    d = R.Director(techs=techs())
+    one = {"n": 1, "span": 150}
+    assert d.r11_radar(_radar_snap(radar=one, done=["radar"]), R.Memory(), None) is None     # small base: one is enough
+    # a radar the player built counts too
+    assert d.r11_radar(_radar_snap(done=["radar"], census={"radar": 1}), R.Memory(), None) is None
+    big = {"n": 1, "span": 2 * R.RADAR_SPAN + 10}
+    a = d.r11_radar(_radar_snap(radar=big, done=["radar"]), R.Memory(), None)
+    assert a.kind == "expand" and a.args["template"] == "radar" and "edge" in a.reason
+    assert R.radars_wanted(big) == 3 and R.radars_wanted({"span": 10 ** 5}, ["crude-oil"]) == R.RADAR_MAX
+    # a radar stage still being built: wait for it
+    st = {"k": 6, "label": "S6", "plan": "m-s6", "gate": [], "template": "radar",
+          "row": {"status": "applied", "ghosts": 3}}
+    assert d.r11_radar(_radar_snap(radar=big, done=["radar"], extra=[st]), R.Memory(), None) is None
+
+
+def test_r11_radar_is_bounded_by_power_headroom():
+    """Each radar draws 300 kW all the time: one only while the load with it stays under RADAR_HEADROOM of capacity.
+    A growth radar waits; one that has to find something (an expansion found no crude oil) asks R8 for power."""
+    d = R.Director(techs=techs())
+    big = {"n": 1, "span": 2 * R.RADAR_SPAN}
+    tight = dict(radar=big, done=["radar"], cap_kw=1800, use_kw=1800 * R.RADAR_HEADROOM - R.RADAR_KW + 1)
+    m = R.Memory()
+    assert d.r11_radar(_radar_snap(**tight), m, None) is None and not m.need_power
+    m = R.Memory(failed={"oil": "oil: no crude oil within reach of the base on the charted map (a radar ...)"})
+    assert d.r11_radar(_radar_snap(**tight), m, None) is None and m.need_power
+    ok = dict(tight, use_kw=1800 * R.RADAR_HEADROOM - R.RADAR_KW - 1)
+    a = d.r11_radar(_radar_snap(**ok), R.Memory(failed=dict(m.failed)), None)
+    assert a.kind == "expand" and a.args["toward"] == ["crude-oil"] and "crude oil" in a.reason
+    assert a.args["headroom_kw"] >= R.RADAR_KW
+
+
+def test_r11_gives_up_for_an_hour_after_three_failed_spots():
+    d = R.Director(techs=techs())
+    m = R.Memory()
+    kinds = []
+    for minute in range(0, 100, 21):
+        s = _radar_snap(radar={"n": 1, "span": 2 * R.RADAR_SPAN}, done=["radar"], tick=int(minute * 3600))
+        a = d.r11_radar(s, m, None)
+        kinds.append(a and a.kind)
+    assert kinds[:3] == ["expand"] * 3 and kinds[3] == "note" and kinds[4] is None
+
+
+def test_r11_exploring_radar_waits_for_the_base_to_grow_when_no_edge_spot_is_far_enough():
+    """Review: on a starter-sized base no edge spot is radar_spacing from the hub radar. The exploring radar (oil found
+    no crude) is not retried - nor power grown for it - until the master's span grew by RADAR_REGROW."""
+    d = R.Director(techs=techs())
+    full = "radar: every spot on the base's edge is within 168 tiles of a radar already"
+    oil = "oil: no crude oil within reach of the base on the charted map"
+    m = R.Memory(failed={"oil": oil})
+    a = d.r11_radar(_radar_snap(radar={"n": 1, "span": 150}, done=["radar"]), m, None)
+    assert a.kind == "expand" and a.args["toward"] == ["crude-oil"] and m.radar_span == 150
+    m.failed["radar"] = full                                   # (the executor records the planner's error)
+    tight = dict(done=["radar"], cap_kw=1800, use_kw=1800 * R.RADAR_HEADROOM, tick=int(200 * 3600))
+    assert d.r11_radar(_radar_snap(radar={"n": 1, "span": 160}, **tight), m, None) is None and not m.need_power
+    s = _radar_snap(radar={"n": 1, "span": 150 + R.RADAR_REGROW}, done=["radar"], tick=int(200 * 3600))
+    a = d.r11_radar(s, m, None)
+    assert a.kind == "expand" and a.args["toward"] == ["crude-oil"]
+
+
+def test_a_planned_expansion_clears_its_failure(tmp_path):
+    """Review: mem.failed was never cleared, so an oil stage planned after a failure still sent R11 exploring for
+    crude oil (and kept a radar wanted) for the rest of the session."""
+    ap, _clock = make(FakeGame(), tmp_path)
+    ap.mem.failed = {"oil": "oil: no crude oil within reach of the base on the charted map"}
+
+    class _Job:
+        action = R.Action("expand", "R8", "G9", "", {"template": "oil"})
+        epoch, error, result = ap.epoch, None, {"ok": True, "stage": "S7", "entities": 12}
+
+        def seconds(self):
+            return 1.0
+    ap.job = _Job()
+    ap._finish_job({}, _radar_snap())
+    assert "oil" not in ap.mem.failed and R.explore_targets(ap.mem) == []
+
+
+def test_explore_targets_come_from_expansions_that_found_nothing_charted():
+    m = R.Memory(failed={"oil": "oil: no crude oil within reach of the base on the charted map",
+                         "copper_grow": "copper-plate: bus row 3: no copper-ore patch with room within reach",
+                         "steel": "steel: no route", "iron_grow": "iron-plate: no route"})
+    assert R.explore_targets(m) == ["copper-ore", "crude-oil"]
+    m.failed["iron_grow"] = "bus: no iron or copper ore patch in reach for its smelting cells"   # (no bus yet)
+    assert R.explore_targets(m) == ["copper-ore", "crude-oil", "iron-ore"]
+
+
+def test_recharted_retries_expansions_once_radar_charts_more():
+    """Use what radar reveals: oil that found no crude on the charted map was given up (goal blocked for an hour);
+    once the charted chunk count grows, its tries come back and the goal is unblocked, so R8 plans it again."""
+    m = R.Memory(failed={"oil": "oil: no crude oil within reach of the base on the charted map",
+                         "steel": "steel: no room"}, attempts={"expand:oil": 4, "expand:steel": 4},
+                 cooldown={"expand:oil": 500.0}, blocked={"G9": 500.0, "G5": 500.0})
+    goals = [{"id": "G9", "template": "oil", "templates": ["oil", "oil_plant"]},
+             {"id": "G5", "template": "steel_column", "templates": ["steel_column"]}]
+    s = _radar_snap(chart={"chunks": 400})
+    assert R.recharted(s, m, goals) == [] and m.charted_seen == 400       # the first look only remembers
+    s.chart = {"chunks": 410}
+    assert R.recharted(s, m, goals) == []                                   # a little more: not yet
+    s.chart = {"chunks": 450}
+    assert R.recharted(s, m, goals) == ["oil"]
+    assert "oil" not in m.failed and "expand:oil" not in m.attempts and "expand:oil" not in m.cooldown
+    assert "G9" not in m.blocked and m.blocked["G5"] == 500.0 and m.attempts["expand:steel"] == 4
+    assert m.charted_seen == 450
+
+
+def test_observe_chart_reaches_the_snapshot_and_r11_runs_in_the_rule_order():
+    o = FakeGame()("autopilot_observe")
+    o["chart"] = {"chunks": 321, "radars": 2}
+    s = R.Snapshot.from_observe(o)
+    assert s.chart == {"chunks": 321, "radars": 2}
+    d = R.Director(techs=techs())
+    busy = dict(done=["radar"], current="logistics", queue=["steel-processing", "electric-mining-drill"])
+    m = R.Memory()
+    acts = [d.step(_radar_snap(**busy), m) for _ in range(4)]       # (R8 first: its goals; then the radar)
+    a = next(a for a in acts if a is not None and a.rule == "R11")
+    assert a.kind == "expand" and a.args["template"] == "radar"
+    a = d.step(_radar_snap(**busy), R.Memory(), planner_busy=True)     # (a planner job runs: no new one)
+    assert a is None or a.rule != "R11"
+
+
+def test_radar_expand_passes_the_chart_survey_to_the_planner():
+    """do_expand for a radar asks the game for its chunk survey around the master and hands it (and what to look
+    for) to the planner as hints."""
+    from factorio_claude.planner import expand as E
+    from factorio_claude.planner.blocks import PE
+    from factorio_claude.planner.testing import load_fixture
+    seen = {}
+
+    def call(op, **kw):
+        seen.setdefault(op, kw)
+        if op == "autopilot_chart_survey":
+            return {"octants": [{"dir": i, "charted": 5 if i else 0, "total": 5} for i in range(8)], "radars": []}
+        return {"ok": True}
+    ex = AP.Executor(call, None)
+
+    class _MP:
+        ents = [PE("lab", -40.5, 10.5, 0), PE("lab", 60.5, -20.5, 0)]
+        surface = "nauvis"
+    gd = load_fixture(1001)[1]
+    a = R.Action("expand", "R11", None, "", {"template": "radar", "toward": ["crude-oil", "bad name!"]})
+    h = ex._radar_hints(_MP, gd, a)
+    assert h["toward"] == ["crude-oil"] and h["octants"][0] == {"dir": 0, "charted": 0, "total": 5}
+    kw = seen["autopilot_chart_survey"]
+    assert kw["x"] == 10.0 and kw["y"] == -5.0 and kw["r0"] == 1 and kw["r1"] == 1 + E.radar_reach(gd)[1]
+    assert kw["surface"] == "nauvis"
+
+
+# ---- robot network (G11, R12; round 5) -------------------------------------------------------------------------------
+ROBOT_TECHS = ["battery", "advanced-oil-processing", "lubricant", "electric-engine", "robotics",
+               "construction-robotics", "logistic-robotics"]
+BLUE_DONE = ALL_RG + ["oil-processing", "plastics"] + BLUE_TECHS
+
+
+def test_robot_techs_are_2_1_names_with_the_lubricant_chain():
+    """The robot path verified in the data export: Robotics needs Battery and Electric engine, which needs Lubricant,
+    which needs Advanced oil processing (lubricant is made from heavy oil); requester chests are behind Logistic
+    system, which needs space science in Space Age (not on the roadmap)."""
+    t = techs()
+    for name in ROBOT_TECHS:
+        assert name in t
+    assert set(t["robotics"]["prerequisites"]) == {"battery", "electric-engine"}
+    assert t["electric-engine"]["prerequisites"] == ["lubricant"]
+    assert t["lubricant"]["prerequisites"] == ["advanced-oil-processing"]
+    assert t["construction-robotics"]["prerequisites"] == ["robotics"]
+    assert "space-science-pack" in [i[0] for i in t["logistic-system"]["ingredients"]]
+    g11 = next(g for g in R.K.roadmap() if g["id"] == "G11")
+    assert g11["needs"] == ["G10"] and g11["round"] <= R.SHIPPED_ROUND and set(g11["techs"]) == set(ROBOT_TECHS)
+    for tech in R.EXPAND_GATE["robots"] + R.EXPAND_GATE["roboports"]:
+        assert tech in t
+
+
+def test_r1_queues_the_robot_path_once_blue_science_runs():
+    """G11's techs come in prerequisite order, only once blue packs are made (they all need chemical science)."""
+    d = R.Director(techs=techs())
+    m = R.Memory()
+    _goals_done(m, *[f"G{i}" for i in range(11)])
+    s = snap(masters=_grown(["mall", "steel", "science", "oil", "oil_plant", "blue"]), done=BLUE_DONE,
+             made={RED: 30, "logistic-science-pack": 30, "chemical-science-pack": 12})
+    gs = R.goal_status(s, m.blocked, m)
+    g = R.current_goal(gs)
+    assert g["id"] == "G11"
+    a = d.r1_research(s, R.Memory(), g)
+    assert a.kind == "research" and a.args["techs"][:2] == ["battery", "advanced-oil-processing"]
+    # (each one once its prerequisites are done)
+    s.research["done"] |= {"battery", "advanced-oil-processing"}
+    assert d.r1_research(s, R.Memory(), g).args["techs"][0] == "lubricant"
+    s.research["done"] |= {"lubricant", "electric-engine"}
+    assert d.r1_research(s, R.Memory(), g).args["techs"][0] == "robotics"
+    s.research["done"].discard("lubricant")
+    s.research["done"].discard("electric-engine")
+    s.research["done"] -= {"battery", "advanced-oil-processing"}
+    # without blue packs only Battery (red + green) is possible
+    s2 = snap(masters=_grown(["mall", "steel", "science", "oil", "oil_plant", "blue"]), done=BLUE_DONE,
+              made={RED: 30, "logistic-science-pack": 30})
+    a = d.r1_research(s2, R.Memory(), g)
+    assert "battery" in a.args["techs"] and "advanced-oil-processing" not in a.args["techs"]
+
+
+def test_r8_plans_the_robot_mall_after_blue_science_and_its_research():
+    d = R.Director(techs=techs())
+    m = R.Memory()
+    _goals_done(m, *[f"G{i}" for i in range(11)])
+    masters = _grown(["mall", "steel", "science", "oil", "oil_plant", "blue"])
+    s = snap(masters=masters, done=BLUE_DONE + ROBOT_TECHS[:-1])
+    d.goals = R.goal_status(s, m.blocked, m)
+    assert d.r8_expand(s, m, None) is None                   # Logistic robotics too (the mall's last machine)
+    s = snap(masters=masters, done=BLUE_DONE + ROBOT_TECHS)
+    d.goals = R.goal_status(s, m.blocked, m)
+    a = d.r8_expand(s, m, None)
+    assert a.kind == "expand" and a.args["template"] == "robots" and a.goal == "G11"
+    # once planned it is not planned again (one robot mall per master)
+    masters = _grown(["mall", "steel", "science", "oil", "oil_plant", "blue", "robots"])
+    s = snap(masters=masters, done=BLUE_DONE + ROBOT_TECHS)
+    d.goals = R.goal_status(s, m.blocked, m)
+    a = d.r8_expand(s, m, None)
+    assert a is None or a.args.get("template") != "robots"
+
+
+def _robot_snap(templates=("robots",), cov=None, robots=None, stock=None, extra=(), done=(), **kw):
+    masters = _grown(["mall", "steel", "science", "oil", "oil_plant", "blue"] + list(templates), extra_stages=extra)
+    masters["m"]["robots"] = cov if cov is not None else {"n": 0, "points": 200, "uncovered": 200}
+    s = snap(masters=masters, done=BLUE_DONE + ROBOT_TECHS + list(done), **kw)
+    s.robots = robots or {}
+    s.ap["mall_stock"] = stock or {}
+    return s
+
+
+def test_r12_lays_the_roboport_grid_once_the_robot_mall_is_built_and_as_the_base_grows():
+    d = R.Director(techs=techs())
+    a = d.r12_robots(_robot_snap(), R.Memory(), None)
+    assert a.kind == "expand" and a.rule == "R12" and a.args["template"] == "roboports" and "first" in a.reason
+    # not before Construction robotics, not without the robot mall built
+    s = _robot_snap()
+    s.research["done"].discard("construction-robotics")
+    assert d.r12_robots(s, R.Memory(), None) is None
+    unbuilt = {"k": 13, "label": "S13", "plan": "m-s13", "gate": [], "template": "robots",
+               "row": {"status": "applied", "ghosts": 40}}
+    assert d.r12_robots(_robot_snap(templates=(), extra=[unbuilt]), R.Memory(), None) is None
+    # a roboport stage still being built: wait for it; everything covered: nothing
+    st = {"k": 13, "label": "S13", "plan": "m-s13", "gate": [], "template": "roboports",
+          "row": {"status": "applied", "ghosts": 4}}
+    assert d.r12_robots(_robot_snap(extra=[st]), R.Memory(), None) is None
+    assert d.r12_robots(_robot_snap(cov={"n": 5, "points": 300, "uncovered": 0}), R.Memory(), None) is None
+    # the base grew past the robots' areas: more roboports (repeatable)
+    a = d.r12_robots(_robot_snap(templates=("robots", "roboports"), cov={"n": 5, "points": 330, "uncovered": 30}),
+                     R.Memory(), None)
+    assert a.kind == "expand" and a.args["template"] == "roboports" and "30 of 330" in a.reason
+    # three failed tries, then it says so and rests an hour (the attempts count per template)
+    m = R.Memory(failed={"roboports": "roboports: no free 4x4 spot linked to the robot network"})
+    for i in range(R.EXPAND_TRIES):
+        m.cooldown.pop("expand:roboports", None)
+        assert d.r12_robots(_robot_snap(), m, None).kind == "expand"
+    m.cooldown.pop("expand:roboports", None)
+    a = d.r12_robots(_robot_snap(), m, None)
+    assert a.kind == "note" and "no free 4x4 spot" in a.reason
+    assert d.r12_robots(_robot_snap(), m, None) is None
+    # mall chests outside the network's logistic area ask for a roboport too (they become passive providers)
+    a = d.r12_robots(_robot_snap(templates=("robots", "roboports"),
+                                 cov={"n": 5, "points": 330, "uncovered": 0, "mall_out": 4}), R.Memory(), None)
+    assert a.kind == "expand" and "4 mall chests" in a.reason
+
+
+def test_r12_brings_the_robot_malls_robots_into_the_emptiest_roboport():
+    d = R.Director(techs=techs())
+    net = {"networks": 1, "roboports": 2, "construction": 0, "available": 0, "logistic": 0, "storage": 1,
+           "ports": [[10, 10, 5], [60, 10, 0]], "storages": [[13.5, 8.5]], "upgradable": 0, "providers": 0}
+    cov = {"n": 2, "points": 200, "uncovered": 0}
+    a = d.r12_robots(_robot_snap(cov=cov, robots=net, stock={"construction-robot": 37}), R.Memory(), None)
+    assert a.kind == "seed_robots" and a.args == {"item": "construction-robot", "count": 37, "x": 60, "y": 10,
+                                                  "into": "roboport"}
+    # enough robots (25 per roboport), or none in the robot mall's chest yet: nothing to bring
+    full = dict(net, construction=50)
+    assert d.r12_robots(_robot_snap(cov=cov, robots=full, stock={"construction-robot": 50}), R.Memory(), None) is None
+    assert d.r12_robots(_robot_snap(cov=cov, robots=net, stock={}), R.Memory(), None) is None
+    # at most one batch per SEED_COOLDOWN_MIN
+    m = R.Memory()
+    assert d.r12_robots(_robot_snap(cov=cov, robots=net, stock={"construction-robot": 50}), m, None).args["count"] == 50
+    assert d.r12_robots(_robot_snap(cov=cov, robots=net, stock={"construction-robot": 50}), m, None) is None
+
+
+def test_r12_turns_the_mall_chests_into_passive_providers():
+    """Logistic chests replace hand-fetching: the helper brings passive provider chests from the robot mall into the
+    robots' storage chest, then the mall chests inside the logistic area are marked for upgrade (the robots swap them,
+    keeping their contents)."""
+    d = R.Director(techs=techs())
+    cov = {"n": 1, "points": 200, "uncovered": 0}
+    net = {"networks": 1, "roboports": 1, "construction": 25, "available": 25, "logistic": 0, "storage": 1,
+           "ports": [[10, 10, 25]], "storages": [[13.5, 8.5]], "upgradable": 14, "providers": 0}
+    a = d.r12_robots(_robot_snap(cov=cov, robots=net, stock={"passive-provider-chest": 50}), R.Memory(), None)
+    assert a.kind == "seed_robots" and a.args == {"item": "passive-provider-chest", "count": 14, "x": 13.5,
+                                                  "y": 8.5, "into": "storage-chest"}
+    some = dict(net, providers=6)
+    a = d.r12_robots(_robot_snap(cov=cov, robots=some, stock={}), R.Memory(), None)
+    assert a.kind == "logistic_chests" and a.args == {"max": 6}
+    # no construction robots yet: they come first (an upgrade needs them)
+    assert d.r12_robots(_robot_snap(cov=cov, robots=dict(some, construction=0), stock={}), R.Memory(),
+                        None) is None
+    # logistic robots last, once Logistic robotics is researched and the construction robots are there
+    done = dict(net, upgradable=0)
+    a = d.r12_robots(_robot_snap(cov=cov, robots=done, stock={"logistic-robot": 50}), R.Memory(), None)
+    assert a.kind == "seed_robots" and a.args["item"] == "logistic-robot" and a.args["count"] == R.LOGISTIC_ROBOTS
+
+
+def test_r12_upkeep_goes_on_while_a_planner_job_runs():
+    d = R.Director(techs=techs())
+    net = {"networks": 1, "roboports": 1, "construction": 0, "ports": [[10, 10, 0]], "storages": []}
+    s = _robot_snap(cov={"n": 1, "points": 300, "uncovered": 100}, robots=net, stock={"construction-robot": 50})
+    a = d.step(s, R.Memory(), planner_busy=True)
+    assert a is not None and a.kind == "seed_robots"
+    s = _robot_snap(cov={"n": 1, "points": 300, "uncovered": 100}, robots=net, stock={"construction-robot": 50})
+    acts = [d.step(s, m) for m in (R.Memory(),)]
+    assert acts[0].rule in ("R1", "R8", "R12")
+
+
+def test_r12_is_reached_through_the_full_rule_order():
+    """review: R12 sits after R8 and R11 in Director.step: with the robot mall built and the research queue full, the
+    roboport grid is planned within a few steps (not shadowed), then the seeding follows once a roboport stands."""
+    d = R.Director(techs=techs())
+    m = R.Memory()
+    _goals_done(m, *[f"G{i}" for i in range(11)])
+    busy = dict(current="solar-energy", queue=["logistics-2", "automation-2"])
+    acts = [d.step(_robot_snap(made={RED: 30, "logistic-science-pack": 30, "chemical-science-pack": 12}, **busy), m)
+            for _ in range(6)]
+    a = next((a for a in acts if a is not None and a.rule == "R12"), None)
+    assert a is not None and a.kind == "expand" and a.args["template"] == "roboports", acts
+    net = {"networks": 1, "roboports": 1, "construction": 0, "ports": [[10, 10, 0]], "storages": [[13.5, 8.5]]}
+    st = {"k": 14, "label": "S14", "plan": "m-s14", "gate": [], "template": "roboports",
+          "row": {"status": "applied", "built": True}}
+    acts = [d.step(_robot_snap(templates=("robots",), extra=[st], cov={"n": 1, "points": 200, "uncovered": 0},
+                               robots=net, stock={"construction-robot": 40}, **busy), m) for _ in range(6)]
+    a = next((a for a in acts if a is not None and a.rule == "R12"), None)
+    assert a is not None and a.kind == "seed_robots" and a.args["count"] == 25, acts
+
+
+def test_g11_done_needs_a_roboport_with_construction_robots():
+    m = R.Memory()
+    _goals_done(m, *[f"G{i}" for i in range(11)])
+    base = dict(cov={"n": 1, "points": 200, "uncovered": 0})
+    s = _robot_snap(**base, robots={"roboports": 1, "construction": 4})
+    assert not next(g for g in R.goal_status(s, m.blocked, m) if g["id"] == "G11")["done"]
+    s = _robot_snap(**base, robots={"roboports": 1, "construction": 25})
+    assert next(g for g in R.goal_status(s, m.blocked, m) if g["id"] == "G11")["done"]
+    o = FakeGame()("autopilot_observe")
+    o["robots"] = {"roboports": 2, "construction": 30, "ports": [[1, 2, 3]]}
+    assert R.Snapshot.from_observe(o).robots["construction"] == 30
+
+
+def test_r6_leaves_ghosts_to_the_robots_until_they_stall():
+    """A plan whose remaining ghosts are all the robots' (in the network, items in it) is not handed to an idle
+    helper; once ROBOT_STALL_MIN passes with none of them built the helper builds them (no_robots). A plan with
+    ghosts the robots cannot build gets the helper as before (build_ghosts leaves the robots' ones)."""
+    d = R.Director(techs=techs())
+    idle = {"alive": True, "current": None, "queue": 0}
+
+    def at(minute, ghosts, robot_ghosts):
+        plan = {"id": "p1", "owner": "autopilot", "status": "applied", "ghosts": ghosts, "robot_ghosts": robot_ghosts}
+        return snap(plans=[plan], helper=idle, tick=int(minute * 3600))
+    m = R.Memory()
+    for minute in (10, 11, 12):
+        assert d.r6_helper(at(minute, 30, 30), m, None) is None
+    assert d.r6_helper(at(13, 22, 22), m, None) is None          # the robots built 8: the clock starts again
+    assert d.r6_helper(at(17.5, 22, 22), m, None) is None
+    a = d.r6_helper(at(18.1, 22, 22), m, None)
+    assert a.kind == "helper_restart" and a.args["no_robots"] and "robots built none" in a.reason
+    # some ghosts the robots cannot build: the normal restart (after HELPER_IDLE_MIN)
+    m = R.Memory()
+    assert d.r6_helper(at(10, 30, 20), m, None) is None
+    a = d.r6_helper(at(11.5, 30, 20), m, None)
+    assert a.kind == "helper_restart" and not a.args.get("no_robots")
+
+
+def test_executor_seeds_robots_and_marks_the_mall_chests():
+    calls = []
+
+    def call(op, **kw):
+        calls.append((op, kw))
+        if op == "autopilot_logistic_chests":
+            return {"ordered": 6, "marked": 0, "providers": 6}
+        return {"ok": True}
+    ex = AP.Executor(call, None)
+    s = snap(helper={"alive": True})
+    a = R.Action("seed_robots", "R12", None, "", {"item": "construction-robot", "count": 30, "x": 60, "y": 10,
+                                                  "into": "roboport"})
+    r = ex.run(a, s)
+    assert r["ok"] and calls[0][0] == "agent_tasks"
+    acq, ins = calls[0][1]["tasks"]
+    assert acq["type"] == "acquire" and acq["item"] == "construction-robot" and acq["count"] == 30
+    assert ins["type"] == "insert" and ins["name"] == "roboport" and (ins["x"], ins["y"]) == (60.0, 10.0)
+    r = ex.run(R.Action("logistic_chests", "R12", None, "", {"max": 6}), s)
+    assert r["ok"] and r["ordered"] == 6 and calls[-1] == ("autopilot_logistic_chests", {"max": 6})
+    ex.run(R.Action("helper_restart", "R6", None, "", {"plan": "p1", "no_robots": True}), s)
+    assert calls[-1] == ("plan_helper", {"id": "p1", "what": "build", "autopilot": True, "no_robots": True})
+    ex.run(R.Action("helper_restart", "R6", None, "", {"plan": "p1"}), s)
+    assert calls[-1][1]["no_robots"] is None

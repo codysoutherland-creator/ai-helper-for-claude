@@ -3,11 +3,14 @@
 --   storage.autopilot = {on, by, since_tick, epoch, phase, goal, step, next_step, note, calls = {n, cap}, seen_tick,
 --     milestones = {{tick, text}}, approve_queue = {[plan id] = {due, epoch, deferred, first_tick, told}},
 --     keepout = {{x, y, tick}}, baseline = {[unit] = true}, baseline_n, owned = {[unit] = plan id},
---     events = {{tick, kind, plan, reason}}, mall_chests = {[unit] = true}, mall_machines = {[unit] = true}}
+--     events = {{tick, kind, plan, reason}}, mall_chests = {[unit] = true}, mall_machines = {[unit] = true},
+--     mall_upgrades = {["x,y,surface"] = bar} (mall chests the robots are upgrading to passive providers)}
 -- Plans whose owner is "autopilot" are approved here (never by Claude) once the safety checks pass, after a grace
 -- period in which Reject still stops them. Only the host (or the server console / RCON) can switch it on or off.
 -- Ops: autopilot_get, autopilot_set {on}, autopilot_status {...}, autopilot_milestone {text}, autopilot_keepout,
--- autopilot_observe, autopilot_baseline_check, autopilot_power_gaps.
+-- autopilot_observe, autopilot_baseline_check, autopilot_power_gaps, autopilot_chart_survey {x, y, r0?, r1?},
+-- autopilot_logistic_chests {max?} (robot network: mall chests -> passive providers).
+-- storage.claude_chart = {[force:surface] = {n = charted chunks, seen}} (radar network; see charted_chunks).
 
 local events = require("scripts.events")
 local api = require("scripts.api")
@@ -207,6 +210,35 @@ end)
 events.on(defines.events.script_raised_built, function(e)
   local ok, err = pcall(on_script_built, e)
   if not ok then log("claude-bridge autopilot script built: " .. tostring(err)) end
+end)
+
+-- round 5 (robot network): what construction robots build counts like the helper's build (a mall chest / machine
+-- registered as the helper's source, an autopilot ghost owned by its plan). A mall chest the robots upgraded to a
+-- passive provider (autopilot_logistic_chests) is registered again with its old inventory bar: it is a new entity
+local function on_robot_built(e)
+  local ent = e.entity
+  if not (ent and ent.valid and ent.unit_number) then return end
+  on_script_built(e)
+  local s = storage.autopilot
+  local up = s and s.mall_upgrades
+  local key = math.floor(ent.position.x) .. "," .. math.floor(ent.position.y) .. "," .. ent.surface.name
+  local bar = up and up[key]
+  if bar and ent.type == "logistic-container" then
+    up[key] = nil
+    for u, at in pairs(s.mall_chests or {}) do        -- the iron chest it replaced (same tile)
+      if type(at) == "table" and math.floor(at[1]) == math.floor(ent.position.x) and
+          math.floor(at[2]) == math.floor(ent.position.y) and (at[3] or "nauvis") == ent.surface.name then
+        s.mall_chests[u] = nil
+        -- (review: the upgrade has no ghost tags, so the plan's ownership moves over from the old unit here)
+        if s.owned and s.owned[u] then s.owned[ent.unit_number], s.owned[u] = s.owned[u], nil end
+      end
+    end
+    pcall(mall_built, ent, {claude_mall = "chest", claude_bar = bar > 0 and bar or nil})
+  end
+end
+events.on(defines.events.on_robot_built_entity, function(e)
+  local ok, err = pcall(on_robot_built, e)
+  if not ok then log("claude-bridge autopilot robot built: " .. tostring(err)) end
 end)
 
 ---------------------------------------------------------------------------
@@ -622,7 +654,10 @@ end)
 
 local ITEMS = {"iron-ore", "copper-ore", "coal", "stone", "iron-plate", "copper-plate", "steel-plate", "stone-brick",
   "iron-gear-wheel", "copper-cable", "electronic-circuit", "automation-science-pack", "logistic-science-pack",
-  "military-science-pack", "chemical-science-pack", "transport-belt", "inserter"}
+  "military-science-pack", "chemical-science-pack", "transport-belt", "inserter",
+  -- round 4: roadmap G9 is done on a plastic rate (without it here G9 never finished and G10, blue science, never
+  -- opened); the blue chain's intermediates for the status line
+  "plastic-bar", "sulfur", "engine-unit", "advanced-circuit"}
 local BURNERS = {"furnace", "mining-drill", "inserter", "boiler"}
 local POWERED = {"assembling-machine", "lab", "inserter", "mining-drill", "furnace", "radar", "pump"}
 
@@ -831,13 +866,36 @@ local function burners(surface, force)
   return out, samples
 end
 
+-- does the force have construction robots anywhere (robot network, round 5)? Only then are ghosts checked one by one
+local function has_robots(force)
+  local ok, nets = pcall(function() return force.logistic_networks end)
+  for _, list in pairs(ok and nets or {}) do
+    for _, net in pairs(list) do
+      if net.valid and (net.all_construction_robots or 0) > 0 then return true end
+    end
+  end
+  return false
+end
+
+local ROBOT_GHOST_CHECKS = 1500    -- ghosts checked for the robots per observe (beyond: a lower bound, R6 then
+                                   -- treats the plan as the helper's)
+
 local function plan_rows(force)
-  local ghosts = {}
+  local ghosts, robot_ghosts = {}, {}
+  local robots = has_robots(force)
+  local checks = 0
   for _, surface in pairs(game.surfaces) do
     for _, g in pairs(surface.find_entities_filtered{type = "entity-ghost", force = force}) do
       local ok, tags = pcall(function() return g.tags end)
       local pid = ok and type(tags) == "table" and tags.claude_plan
-      if pid then ghosts[pid] = (ghosts[pid] or 0) + 1 end
+      if pid then
+        ghosts[pid] = (ghosts[pid] or 0) + 1
+        -- ghosts the construction robots will build (the helper leaves them to the robots: agent.robots_cover)
+        if robots and checks < ROBOT_GHOST_CHECKS then
+          checks = checks + 1
+          if agent.robots_cover(g) then robot_ghosts[pid] = (robot_ghosts[pid] or 0) + 1 end
+        end
+      end
     end
   end
   local s = storage.autopilot or {}
@@ -845,7 +903,8 @@ local function plan_rows(force)
   for _, p in ipairs(plans.list(force.name)) do
     local row = {id = p.id, status = p.status, owner = p.owner, master = p.master, stage = p.stage,
       superseded = p.superseded, ghosts = ghosts[p.id] or 0, entities = #p.entities, blocked = p.autopilot_blocked,
-      queued = s.approve_queue and s.approve_queue[p.id] and true or nil, bbox = p.bbox}
+      queued = s.approve_queue and s.approve_queue[p.id] and true or nil, bbox = p.bbox,
+      robot_ghosts = robot_ghosts[p.id]}
     if p.status == "applied" then row.built = plans.stage_built(p) end
     if p.future then row.gate = p.future.gate; row.after = p.future.after end
     if p.result then row.placed, row.result_blocked = p.result.placed, p.result.blocked end
@@ -908,6 +967,168 @@ api.register("autopilot_research", function(args)
   return {ok = ok, error = ok and nil or tostring(err), queue = q}
 end)
 
+---------------------------------------------------------------------------
+-- radar network: what the force has charted
+---------------------------------------------------------------------------
+
+-- storage.claude_chart = {[force index .. ":" .. surface index] = {n = charted chunks, seen = {[chunk key] = true}}}:
+-- counted once (the first time it is asked for: no on_configuration_changed needed), then kept current by
+-- on_chunk_charted. The autopilot sees the count grow when a radar charts new ground and retries expansions that found
+-- nothing on the charted map. (review: on_chunk_charted also fires on every RE-chart - a radar re-charts its 7x7
+-- chunks all the time - so only chunks not seen before count; a bare counter grew without new ground and retried the
+-- failed expansions on every R8 pass)
+local function chart_key(force, surface) return force.index .. ":" .. surface.index end
+local function chunk_key(c) return c.x * 4194304 + c.y end       -- (2^22: chunk coordinates stay within +-2^21)
+
+local function charted_chunks(surface, force)
+  storage.claude_chart = storage.claude_chart or {}
+  local key = chart_key(force, surface)
+  local t = storage.claude_chart[key]
+  if type(t) ~= "table" then
+    t = {n = 0, seen = {}}
+    for c in surface.get_chunks() do
+      if force.is_chunk_charted(surface, c) then t.n = t.n + 1; t.seen[chunk_key(c)] = true end
+    end
+    storage.claude_chart[key] = t
+  end
+  return t.n
+end
+autopilot.charted_chunks = charted_chunks
+
+events.on(defines.events.on_chunk_charted, function(e)
+  local all = storage.claude_chart
+  if not (all and e.force) then return end
+  local t = all[e.force.index .. ":" .. e.surface_index]
+  if type(t) ~= "table" then return end
+  local k = chunk_key(e.position)
+  if not t.seen[k] then t.seen[k] = true; t.n = t.n + 1 end
+end)
+
+-- {x, y, r0?, r1?, surface?}: charted / total chunks per octant (0 east, clockwise: 2 south, 4 west, 6 north) in the
+-- ring r0..r1 chunks around (x, y), and the force's radars. The planner puts the next radar toward the octant with the
+-- most uncharted ground (planner/expand.py radar_scores).
+api.register("autopilot_chart_survey", function(args)
+  local surface = util.get_surface(args)
+  local force = util.get_force(args)
+  local cx, cy = math.floor((tonumber(args.x) or 0) / 32), math.floor((tonumber(args.y) or 0) / 32)
+  local r1 = math.max(1, math.min(tonumber(args.r1) or 16, 32))
+  local r0 = math.max(0, math.min(tonumber(args.r0) or 0, r1))
+  local oct = {}
+  for i = 0, 7 do oct[i + 1] = {dir = i, charted = 0, total = 0} end
+  for dx = -r1, r1 do
+    for dy = -r1, r1 do
+      local r = math.max(math.abs(dx), math.abs(dy))
+      if r >= r0 and r > 0 then
+        local i = math.floor(math.atan2(dy, dx) / (math.pi / 4) + 0.5) % 8
+        local o = oct[i + 1]
+        o.total = o.total + 1
+        if force.is_chunk_charted(surface, {cx + dx, cy + dy}) then o.charted = o.charted + 1 end
+      end
+    end
+  end
+  local radars = {}
+  for _, r in pairs(surface.find_entities_filtered{type = "radar", force = force, limit = 64}) do
+    radars[#radars + 1] = {x = r.position.x, y = r.position.y, working = r.status == defines.entity_status.working}
+  end
+  return {octants = oct, radars = radars, chunks = charted_chunks(surface, force)}
+end)
+
+---------------------------------------------------------------------------
+-- robot network (round 5, roadmap G11)
+---------------------------------------------------------------------------
+
+-- the autopilot's mall chests (the mall's and the robot mall's output chests) on `surface`: {{entity, unit}}
+local function mall_chest_entities(s, surface)
+  local out = {}
+  for u, at in pairs(s.mall_chests or {}) do
+    if type(at) == "table" and (at[3] or "nauvis") == surface.name then
+      local e = surface.find_entities_filtered{position = {at[1], at[2]}, radius = 0.6, limit = 1,
+        type = {"container", "logistic-container"}}[1]
+      if e then out[#out + 1] = {e, u} end
+    end
+  end
+  return out
+end
+
+-- {networks, roboports, construction, available, logistic, storage, ports = {{x, y, robots}}, storages = {{x, y}},
+-- upgradable, providers}: the force's logistic networks on the surface (robots: all / idle construction robots,
+-- logistic robots), up to 8 roboports with the robots in them (the emptiest one gets the robot mall's robots), up to 4
+-- storage chests (passive provider chests for the upgrades go there), the mall chests inside a
+-- network's logistic area that are still plain chests (autopilot_logistic_chests upgrades them) and the passive
+-- provider chests the networks hold as items (what the robots need for those upgrades)
+local function robot_status(surface, force)
+  local out = {networks = 0, roboports = 0, construction = 0, available = 0, logistic = 0, storage = 0, ports = {},
+    storages = {}, upgradable = 0, providers = 0}
+  local ok, nets = pcall(function() return force.logistic_networks[surface.name] end)
+  for _, net in pairs(ok and nets or {}) do
+    if net.valid then
+      out.networks = out.networks + 1
+      out.construction = out.construction + (net.all_construction_robots or 0)
+      out.available = out.available + (net.available_construction_robots or 0)
+      out.logistic = out.logistic + (net.all_logistic_robots or 0)
+      out.storage = out.storage + #(net.storages or {})
+      for _, st in pairs(net.storages or {}) do
+        if #out.storages < 4 and st.valid and st.name == "storage-chest" then
+          out.storages[#out.storages + 1] = {st.position.x, st.position.y}
+        end
+      end
+      local okc, n = pcall(net.get_item_count, "passive-provider-chest")
+      out.providers = out.providers + (okc and n or 0)
+    end
+  end
+  for _, r in pairs(surface.find_entities_filtered{type = "roboport", force = force}) do
+    out.roboports = out.roboports + 1
+    if #out.ports < 8 then
+      local inv = r.get_inventory(defines.inventory.roboport_robot)
+      out.ports[#out.ports + 1] = {r.position.x, r.position.y, inv and inv.get_item_count() or 0}
+    end
+  end
+  if out.networks > 0 then
+    for _, ch in ipairs(mall_chest_entities(storage.autopilot or {}, surface)) do
+      local e = ch[1]
+      if e.type == "container" and not e.to_be_upgraded() and
+          surface.find_logistic_network_by_position(e.position, force) then
+        out.upgradable = out.upgradable + 1
+      end
+    end
+  end
+  return out
+end
+autopilot.robot_status = robot_status
+
+-- {surface?, max?}: logistic chests replace hand-fetching. The mall chests inside a logistic network's logistic area
+-- that are still plain chests are marked for upgrade to passive provider chests (at most `max`, default 32): the
+-- construction robots swap them (their contents stay; the robots take the passive provider chests from the network,
+-- the helper puts the robot mall's there first), and from then on the robots take what the autopilot's ghosts need
+-- straight from the mall. Each upgraded chest is registered again as a mall chest with its inventory bar once built
+-- (on_robot_built). -> {ordered, marked (already waiting), providers (passive provider chests in the networks)}
+api.register("autopilot_logistic_chests", function(args)
+  local surface = util.get_surface(args)
+  local force = util.get_force(args)
+  local s = autopilot.state()
+  s.mall_upgrades = s.mall_upgrades or {}
+  local cap = math.max(1, math.min(tonumber(args.max) or 32, 64))
+  local ordered, marked = 0, 0
+  for _, ch in ipairs(mall_chest_entities(s, surface)) do
+    local e = ch[1]
+    if e.type == "container" and surface.find_logistic_network_by_position(e.position, force) then
+      if e.to_be_upgraded() then
+        marked = marked + 1
+      elseif ordered < cap then
+        local inv = e.get_inventory(defines.inventory.chest)
+        local bar = inv and inv.supports_bar() and inv.get_bar() - 1 or 0
+        if bar >= #inv then bar = 0 end                -- (no bar set: the whole chest)
+        local ok = pcall(e.order_upgrade, {target = "passive-provider-chest", force = force})
+        if ok and e.to_be_upgraded() then
+          ordered = ordered + 1
+          s.mall_upgrades[math.floor(e.position.x) .. "," .. math.floor(e.position.y) .. "," .. surface.name] = bar
+        end
+      end
+    end
+  end
+  return {ordered = ordered, marked = marked, providers = robot_status(surface, force).providers}
+end)
+
 -- {surface?}: everything the companion's Observer needs in one call (numbers and prototype names only)
 api.register("autopilot_observe", function(args)
   local surface = util.get_surface(args)
@@ -934,6 +1155,8 @@ api.register("autopilot_observe", function(args)
     totals = totals, power = power(surface, force), burners_out = nofuel, burners_out_at = nofuel_at,
     census = census, problems = problems, helper = helper, plans = plan_rows(force), labs = labs(surface, force),
     enemies = {peaceful = peaceful, spawners = spawners}, autopilot = autopilot.get(true),
+    chart = {chunks = charted_chunks(surface, force), radars = census["radar"] or 0},
+    robots = (census["roboport"] or 0) > 0 and robot_status(surface, force) or nil,
     defense = autopilot.defense_status and select(2, pcall(autopilot.defense_status, force)) or nil}
 end)
 

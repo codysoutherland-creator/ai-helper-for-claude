@@ -333,3 +333,480 @@ def test_grow_without_a_bus_lays_one():
     w, gd, mp = setup(2002, "hub")
     info = X.extend(mp, w, gd, "copper_grow")
     assert _bus(mp) and M.validate_stage(mp, gd, w, info["stage"]).ok
+
+
+@pytest.mark.parametrize("seed,variant", [(1001, "hub"), (2002, "onsite")])
+def test_mall_add_puts_magazines_into_a_built_mall(seed, variant):
+    """Defence v2: a mall planned before Gun turrets was researched gets the firearm-magazine machine later, in its
+    reserved room at the row's east end (nothing of the row moves; belt A runs on to it); a mall planned after it has
+    the magazine slot from the start."""
+    w, gd, mp = setup(seed, variant)
+    info = X.extend(mp, w, gd, "mall", after=4)
+    assert "firearm-magazine" not in info["items"]
+    with pytest.raises(X.ExpandError):
+        X.extend(mp, w, gd, "mall_add", researched=list(RESEARCH))           # nothing new researched
+    n_before = len(mp.ents)
+    add = X.extend(mp, w, gd, "mall_add", researched=list(RESEARCH) + ["gun-turret", "fast-inserter"])
+    k = add["stage"]
+    # (2002 onsite: a pole the mall needed stands in the empty fast-inserter slot - that item waits)
+    assert "firearm-magazine" in add["items"] and add["key"] == "x_malladd"
+    assert set(add["items"]) == ({"firearm-magazine", "fast-inserter"} if seed == 1001 else {"firearm-magazine"})
+    assert len(mp.ents) == n_before + add["entities"] and add["entities"] < 40
+    assert set(add["items"]) <= X.mall_items(mp)
+    assert not M.check_monotone(mp, gd) and M.validate_stage(mp, gd, w, k).ok
+    assert sorted(mp.stages[[s.index for s in mp.stages].index(k)].gate) == sorted(B.MALL_GATE[i] for i in add["items"])
+    new = _stage(mp, k)
+    chests = [e for e in new if (e.extra or {}).get("role") == "mall_chest"]
+    assert {e.extra["unit"] for e in chests} == set(add["items"])
+    assert all((e.extra or {}).get("zone", "").startswith("x_mall") for e in new)
+    plan = M.stage_plan(mp, k, w, gd, validation={"ok": True})
+    assert any(len(r) > 5 and isinstance(r[5], dict) and r[5].get("mall") == "machine" for r in plan.rows())
+    with pytest.raises(X.ExpandError):                                      # all in: nothing more to add
+        X.extend(mp, w, gd, "mall_add", researched=list(RESEARCH) + ["gun-turret", "fast-inserter"])
+    # planned after Gun turrets: the magazine slot is part of the mall itself
+    w2, gd2, mp2 = setup(seed, variant, extra_research=("gun-turret",))
+    assert "firearm-magazine" in X.extend(mp2, w2, gd2, "mall", after=4)["items"]
+
+
+# ---- radar network ------------------------------------------------------------------------------------------------------
+def _radars(mp):
+    return [e for e in mp.ents if e.name == "radar"]
+
+
+def _on_ore(w, gd, e):
+    return any(w.resource_at(x, y) for x, y in gd.footprint(e.name, e.x, e.y, 0))
+
+
+@pytest.mark.parametrize("seed,variant", [(1001, "hub"), (2002, "onsite"), (3003, "hub"), (4004, "hub")])
+def test_first_radar_next_to_the_hub_powered_and_valid(seed, variant):
+    """Radar network: the first radar stands next to the hub, off the ore, joined to the master's network by a short
+    pole chain (or none), and the base validates with it (its 300 kW within the generators' capacity). 2.1 locks the
+    radar recipe behind the Radar tech: that is the stage's gate."""
+    w, gd, mp = setup(seed, variant, ("radar",))
+    info = X.extend(mp, w, gd, "radar")
+    k = info["stage"]
+    assert info["key"] == "x_radar" and "radar" in X.templates_built(mp)
+    r = _radars(mp)
+    assert len(r) == 1 and (r[0].extra or {}).get("stage") == k and [r[0].x, r[0].y] == info["radar"]
+    hub = mp.hub
+    assert max(abs(r[0].x - hub[0]), abs(r[0].y - hub[1])) <= X.RADAR_HUB_R + 1
+    assert not _on_ore(w, gd, r[0])
+    assert info["entities"] <= 1 + X.RADAR_POLES_MAX
+    assert all(e.name == "radar" or gd.entity(e.name)["type"] == "electric-pole" for e in _stage(mp, k))
+    rep = M.validate_stage(mp, gd, w, k)
+    assert rep.ok and not [i for i in rep.errors if i.kind.startswith("power")]
+    assert not M.check_monotone(mp, gd)
+    assert mp.stages[[s.index for s in mp.stages].index(k)].gate == ["radar"]
+    _zones_disjoint(mp, k)
+    plan = M.stage_plan(mp, k, w, gd, validation={"ok": True})        # (what R2 sends to the game)
+    assert any(r[0] == "radar" for r in plan.rows())
+
+
+def test_radar_data_from_the_export():
+    """2.1: the radar recipe is locked (the Radar tech, 20 red packs); 300 kW; the planner's spacing comes from the
+    area a radar keeps charted (7x7 chunks: max_distance_of_nearby_sector_revealed 3 when the export has it)."""
+    _w, gd = load_fixture(1001)
+    assert gd.raw["recipes"]["radar"]["enabled"] is False
+    assert {"type": "unlock-recipe", "recipe": "radar"}.items() <= \
+        next(e for e in gd.raw["technologies"]["radar"]["effects"]).items()
+    assert X.radar_kw(gd) == 300 and X.radar_reach(gd) == (3, 14) and X.radar_spacing(gd) == 168
+
+
+def test_second_radar_waits_for_the_base_to_grow():
+    """The squares two radars keep charted must not overlap much: on a starter base every spot of its edge is within
+    radar_spacing of the hub's radar, so a second one does not fit yet (the master is unchanged)."""
+    w, gd, mp = setup(1001, "hub", ("radar",))
+    X.extend(mp, w, gd, "radar")
+    n = len(mp.ents)
+    with pytest.raises(X.ExpandError, match="within 168 tiles") as err:
+        X.extend(mp, w, gd, "radar")
+    assert len(mp.ents) == n
+    from factorio_claude.autopilot_rules import RADAR_FULL
+    assert RADAR_FULL in str(err.value)[:120]       # (R11 reads it from mem.failed: the exploring radar waits)
+
+
+@pytest.mark.parametrize("seed,variant", [(1001, "hub"), (3003, "hub")])
+def test_next_radar_on_the_edge_toward_uncharted_ground(seed, variant, monkeypatch):
+    """Later radars go on a ring just outside the base's built bounding box, toward the octant the game's chunk survey
+    finds least charted, at least radar_spacing from every other radar; each validates (powered). (The fixture bases
+    are starter-sized: the overlap allowed is raised so a second radar fits on their edge.)"""
+    monkeypatch.setattr(X, "RADAR_OVERLAP", 0.7)
+    gap = X.radar_spacing(load_fixture(seed)[1])
+    for want in (2, 4):                         # south, west (open on both fixtures)
+        w, gd, mp = setup(seed, variant, ("radar",))
+        X.extend(mp, w, gd, "radar")
+        oct_ = [{"dir": i, "charted": 0 if i == want else 9, "total": 9} for i in range(8)]
+        bbox = M._ents_rect(gd, mp.ents)
+        info = X.extend(mp, w, gd, "radar", hints={"octants": oct_})
+        assert info["dir"] == want and info["key"].startswith("x_radar_")
+        a, b = _radars(mp)
+        assert max(abs(a.x - b.x), abs(a.y - b.y)) >= gap
+        # on the ring: outside the bounding box, within the farthest ring offset of it
+        out = max(bbox[0] - b.x, b.x - bbox[2], bbox[1] - b.y, b.y - bbox[3])
+        assert 0 < out <= max(X.RADAR_EDGE) + 3
+        assert not _on_ore(w, gd, b) and M.validate_stage(mp, gd, w, info["stage"]).ok
+        assert not M.check_monotone(mp, gd)
+
+
+def test_next_radar_toward_the_exports_uncharted_chunks(monkeypatch):
+    """Without the game's survey the export's own charted mask decides: chunks east of the base left uncharted (a
+    charted-only export has nothing there) pull the radar east."""
+    monkeypatch.setattr(X, "RADAR_OVERLAP", 0.7)
+    w, gd, mp = setup(3003, "hub", ("radar",))
+    X.extend(mp, w, gd, "radar")
+    x1 = M._ents_rect(gd, mp.ents)[2]
+    j = x1 + 20 - w.x0
+    w.known[:, j:] = False
+    info = X.extend(mp, w, gd, "radar")
+    assert info["dir"] in (7, 0, 1)            # east-ish
+
+
+def test_next_radar_toward_ore_the_autopilot_needs(monkeypatch):
+    """hints["toward"]: a radar looks toward the nearest known patch of each resource the autopilot needs (crude oil
+    north-west of the base here) when the survey shows no uncharted direction."""
+    monkeypatch.setattr(X, "RADAR_OVERLAP", 0.7)
+    w, gd, mp = setup(3003, "hub", ("radar",))
+    bx0, by0, _bx1, _by1 = M._ents_rect(gd, mp.ents)
+    add_crude(w, [(bx0 - 40 + i, by0 - 40 + (i % 3)) for i in range(0, 10, 2)])
+    X.extend(mp, w, gd, "radar")
+    flat = [{"dir": i, "charted": 9, "total": 9} for i in range(8)]
+    info = X.extend(mp, w, gd, "radar", hints={"octants": flat, "toward": ["crude-oil"]})
+    assert info["dir"] in (4, 5, 6)            # west / north-west / north
+
+
+def test_radar_scores_rank_explore_and_wanted_ore():
+    w, gd = load_fixture(1001)
+    survey = [{"dir": i, "charted": 1 if i == 2 else 10, "total": 10} for i in range(8)]
+    ranked = X.radar_scores(w, gd, (0, 0), [(100, 0), (0, 100), (-100, 0)], {"octants": survey})
+    assert ranked[0][1] == (0, 100)                         # south: least charted
+    # a resource the charted map has no patch of counts the unexplored share once more (it has to be found)
+    a = X.radar_scores(w, gd, (0, 0), [(0, 100)], {"octants": survey})[0][0]
+    b = X.radar_scores(w, gd, (0, 0), [(0, 100)], {"octants": survey, "toward": ["no-such-ore"]})[0][0]
+    assert b > a
+    assert X.octant(1, 0) == 0 and X.octant(0, 1) == 2 and X.octant(-1, 0) == 4 and X.octant(0, -1) == 6
+
+
+def test_oil_that_finds_no_crude_on_the_charted_map_asks_for_a_radar_then_fits_once_charted():
+    """Use what radar reveals: the oil template's error on a map without charted crude is one the autopilot reads as
+    "explore for crude oil" (R11 points the next radar that way); once the wells are on the charted map the same
+    template fits (the planner reads the charted chunks fresh on every expansion)."""
+    from factorio_claude import autopilot_rules as R
+    w, gd, mp = setup(1001, "hub", OIL_RESEARCH)
+    with pytest.raises(X.ExpandError) as err:
+        X.extend(mp, w, gd, "oil")
+    assert R.explore_targets(R.Memory(failed={"oil": str(err.value)})) == ["crude-oil"]
+    add_crude(w, WELLS_1001)                    # (what a radar charting those chunks puts in the next export)
+    info = X.extend(mp, w, gd, "oil")
+    assert M.validate_stage(mp, gd, w, info["stage"]).ok
+
+
+# ---- blue science (roadmap G10, round 4) -----------------------------------------------------------------------------
+BLUE_RESEARCH = ("automation-2", "engine", "advanced-circuit", "sulfur-processing", "chemical-science-pack")
+WELLS_2002 = [(36, 16), (42, 21), (33, 25), (45, 13)]     # synthetic crude-oil wells near the 2002 hub master
+
+
+def test_blue_block_layout_rates_and_names():
+    """blocks.blue_block on its own validates (iron, plastic, copper, steel, water and petroleum at its ports, packs
+    out of its belt port); assemblers 2 for the packs, engines and advanced circuits: ~13.5 packs/min, the engines'
+    rate. Every recipe and gate tech is a 2.1 name from the data export (Advanced circuit, not 1.1's Advanced
+    electronics). The block itself is engine-checked by tests/live_expand_blocks.py X6 (13.3 packs/min)."""
+    _w, gd = load_fixture(1001, cached=False)        # (enabling recipes must not leak into the cached fixture)
+    for r in gd.raw["recipes"].values():
+        r["enabled"] = True
+    blk = B.blue_block(gd)
+    rep = validate(blk.entities, gd, None, {"power": "external", "assume_research": True, "ports": blk.ports})
+    assert rep.ok, rep.summary()
+    assert blk.rates["chemical-science-pack"] == 13.5 and blk.info["capacity"]["chemical-science-pack"] == 15.0
+    # half a sulfur per pack, the sulfur recipe 30 water + 30 petroleum -> 2 (review: the block once said twice that)
+    sulfur = gd.raw["recipes"]["sulfur"]
+    per_sulfur = {i["name"]: i["amount"] / sulfur["products"][0]["amount"] for i in sulfur["ingredients"]}
+    assert blk.rates["petroleum-gas"] == -0.5 * per_sulfur["petroleum-gas"] * 13.5
+    assert blk.rates["water"] == -0.5 * per_sulfur["water"] * 13.5
+    names = {e.name for e in blk.entities}
+    assert "assembling-machine-2" in names and "chemical-plant" in names and not blk.requires
+    assert {e.recipe for e in blk.entities if e.recipe} == {"copper-cable", "advanced-circuit", "electronic-circuit",
+                                                           "iron-gear-wheel", "pipe", "engine-unit", "sulfur",
+                                                           "chemical-science-pack"}
+    for e in blk.entities:
+        if e.recipe:
+            assert e.recipe in gd.raw["recipes"]
+    for t in X.GATES["blue"]:
+        assert t in gd.raw["technologies"]
+    assert "advanced-electronics" not in gd.raw["technologies"]
+    # the sulfur plant's water and petroleum ports are its 1st and 2nd input (the recipe's order; engine-checked)
+    plant = next(e for e in blk.entities if e.recipe == "sulfur")
+    conns = [c for c in gd.fluid_connections_full(plant.name, plant.x, plant.y, plant.direction)
+             if c["production_type"] == "input"]
+    by = {p.item: (p.x, p.y) for p in blk.ports}
+    assert tuple(conns[0]["target_tile"]) == by["water"] and tuple(conns[1]["target_tile"]) == by["petroleum-gas"]
+    # petroleum on the wrong input: water and petroleum swapped is not a valid block
+    wrong = [Port(p.kind, {"water": "petroleum-gas", "petroleum-gas": "water"}.get(p.item, p.item), p.x, p.y,
+                  p.direction) for p in blk.ports]
+    rep = validate(blk.entities, gd, None, {"power": "external", "assume_research": True, "ports": wrong})
+    assert not rep.ok and any(i.kind in ("fluid_source", "fluid_mix") for i in rep.errors)
+
+
+def test_labs_pass_packs_on_to_labs():
+    """The blue stage's lab row: an inserter takes packs out of a lab only into another lab (validator; the engine
+    does the same, live_expand_blocks X7)."""
+    _w, gd = load_fixture(1001)
+    ents = [PE("lab", 1.5, 1.5), PE("inserter", 1.5, 3.5, 8, None, {}), PE("iron-chest", 1.5, 4.5),
+            PE("inserter", 3.5, 1.5, 12), PE("lab", 5.5, 1.5), PE("inserter", 7.5, 1.5, 12), PE("lab", 9.5, 1.5),
+            PE("medium-electric-pole", 3.5, 3.5), PE("medium-electric-pole", 7.5, 3.5)]
+    opts = {"power": "external", "assume_research": True,
+            "containers": {(1.5, 4.5): ["automation-science-pack", "logistic-science-pack"]}}
+    rep = validate(ents, gd, None, opts)
+    assert rep.ok, rep.summary()
+    # out of a lab onto a belt: not possible
+    bad = ents[:4] + ents[-2:] + [PE("transport-belt", 4.5, 1.5, 4), PE("transport-belt", 5.5, 1.5, 4)]
+    rep = validate(bad, gd, None, opts)
+    assert any(i.kind == "inserter_pickup" for i in rep.errors)
+
+
+def test_blue_science_off_the_bus_with_sulfur_from_the_oil_plant():
+    """G10: the blue block beside the plate bus (iron and copper from taps downstream of the mall's), steel out of the
+    steel column's depot and plastic out of the oil plant's depot (an inserter and a belt each), petroleum piped from
+    the oil plant's header, water from an offshore pump of its own, packs on a belt to a row of new labs chained from
+    one of the master's labs. The base validates with it, the master stays monotone (the depot inserters, the header
+    pipe and the lab row belong to the zones they stand in), and the rate check gets ~13.5 packs/min."""
+    w, gd, mp = setup(2002, "hub", OIL_RESEARCH + BLUE_RESEARCH)
+    with pytest.raises(X.ExpandError):
+        X.extend(mp, w, gd, "blue")            # no plate bus, no oil plant yet
+    X.extend(mp, w, gd, "mall", after=4)
+    X.extend(mp, w, gd, "steel")
+    X.extend(mp, w, gd, "science")
+    add_crude(w, WELLS_2002)
+    X.extend(mp, w, gd, "oil")
+    X.extend(mp, w, gd, "oil_plant")
+    n0 = len(mp.ents)
+    info = X.extend(mp, w, gd, "blue")
+    k = info["stage"]
+    assert M.slabel(k) == "S10" and len(mp.ents) > n0 and info["key"] == "x_blue"
+    new = _stage(mp, k)
+    recipes = [e.recipe for e in new if e.recipe]
+    assert recipes.count("chemical-science-pack") == B.BLUE_CHEM and recipes.count("sulfur") == 1
+    roles = [(e.extra or {}).get("role") for e in new]
+    assert roles.count("depot_out") == 2 and "petroleum_pipe" in roles and "water_pipe" in roles
+    assert sum(1 for e in new if e.name == "offshore-pump") == 1
+    assert X.LAB_ROW_MIN <= sum(1 for e in new if e.name == "lab") <= X.LAB_ROW and "lab_chain" in roles
+    items = {f["item"] for f in info["feeds"]}
+    assert items == {"iron-plate", "copper-plate", "steel-plate", "plastic-bar", "chemical-science-pack"}
+    rep = M.validate_stage(mp, gd, w, k)
+    assert rep.ok, rep.summary()
+    assert not M.check_monotone(mp, gd)
+    # the first chain inserter takes from one of the master's labs (red + green from its spine inserter)
+    first = next(e for e in new if (e.extra or {}).get("role") == "lab_chain" and e.extra.get("unit") == 0)
+    dx, dy = X.DVEC[first.direction]
+    old = [e for e in mp.ents if e.name == "lab" and (e.extra or {}).get("stage", 0) < k]
+    assert any(abs(e.x - (first.x + 2 * dx)) < 0.01 and abs(e.y - (first.y + 2 * dy)) < 0.01 for e in old)
+    assert X.blue_rate(mp, gd, k) == {"chemical-science-pack": 13.5} and not X.blue_rate(mp, gd, k - 1)
+    with pytest.raises(X.ExpandError):
+        X.extend(mp, w, gd, "blue")            # once per master
+
+
+def test_long_straight_pipes_become_pipe_to_ground_pairs():
+    """The blue stage's petroleum and water lines: straight stretches as pipe-to-ground pairs back to back (at most
+    the pipe-to-ground's reach apart), the run's first and last pipe plain; the line validates as one fluid network
+    (engine-checked: live_expand_blocks X8)."""
+    _w, gd = load_fixture(1001, cached=False)        # (enabling recipes must not leak into the cached fixture)
+    for r in gd.raw["recipes"].values():
+        r["enabled"] = True
+    route = [PE("pipe", x + 0.5, 0.5) for x in range(30)] + [PE("pipe", 29.5, y + 0.5) for y in range(1, 4)]
+    ents, under = X._ptg_compress(gd, route)
+    ptg = [e for e in ents if e.name == "pipe-to-ground"]
+    assert len(ents) < 12 and len(ptg) % 2 == 0 and ents[0].name == "pipe" and len(under) > 15
+    md = gd.entity("pipe-to-ground")["max_underground_distance"]
+    for a, b in zip(ptg[::2], ptg[1::2]):
+        assert a.direction == X.WEST and b.direction == X.EAST and 2 <= b.x - a.x <= md
+    rep = validate(ents, gd, None, {"assume_research": True,
+                                    "ports": [Port("pipe_in", "water", -1, 0, X.EAST),
+                                              Port("pipe_out", "water", 29, 4, X.SOUTH)]})
+    assert rep.ok and not any(i.kind == "pipe_to_ground" for i in rep.errors + rep.warnings), rep.summary()
+
+
+# ---- the robot network (roadmap G11, round 5) ------------------------------------------------------------------------
+ROBOT_RESEARCH = ("battery", "advanced-oil-processing", "lubricant", "electric-engine", "robotics",
+                  "construction-robotics", "logistic-robotics")
+
+
+def test_robot_block_layout_rates_and_names():
+    """blocks.robot_block on its own validates (iron, steel, copper, plastic at its belt ports, water and crude oil
+    at its pipe ports): four belts with one plate lane and one intermediate lane each, an oil refinery on ADVANCED
+    oil processing (lubricant needs heavy oil) and the battery / electric engine / frame chain; every recipe and gate
+    tech is a 2.1 name from the data export. Its shape is two rects (the row and the fluid section above its frame
+    machines): every entity stands in one. Engine-checked: tests/live_robots.py RB1 (2.29 frames/min; every product,
+    logistic robots last)."""
+    _w, gd = load_fixture(1001, cached=False)        # (enabling recipes must not leak into the cached fixture)
+    for r in gd.raw["recipes"].values():
+        r["enabled"] = True
+    blk = B.robot_block(gd)
+    rep = validate(blk.entities, gd, None, {"power": "external", "assume_research": True, "ports": blk.ports})
+    assert rep.ok, rep.summary()
+    assert not [i for i in rep.warnings if i.kind.startswith("fluid") and "light-oil" not in i.msg]
+    assert blk.rates["flying-robot-frame"] == 2.25 and not blk.requires
+    recipes = {e.recipe for e in blk.entities if e.recipe}
+    assert {"battery", "sulfuric-acid", "sulfur", "lubricant", "advanced-oil-processing", "electric-engine-unit",
+            "flying-robot-frame", "construction-robot", "logistic-robot", "roboport", "storage-chest",
+            "passive-provider-chest", "steel-chest"} <= recipes
+    for rc in recipes:
+        assert rc in gd.raw["recipes"]
+    for t in X.GATES["robots"] + X.GATES["roboports"]:
+        assert t in gd.raw["technologies"]
+    chests = {e.extra["unit"] for e in blk.entities if (e.extra or {}).get("role") == "mall_chest"}
+    assert chests == set(B.ROBOT_ITEMS)
+    assert sum(1 for e in blk.entities if e.name == "storage-tank") == 2
+    # electric engines need an assembler 2 (crafting with fluid)
+    assert next(e for e in blk.entities if e.recipe == "electric-engine-unit").name == "assembling-machine-2"
+    # the shape: every entity's tiles inside one of the two rects; the ports just outside them
+    shape = blk.info["shape"]
+    for e in blk.entities:
+        ts = gd.footprint(e.name, e.x, e.y, e.direction)
+        assert any(all(r[0] <= x < r[2] and r[1] <= y < r[3] for x, y in ts) for r in shape), e
+    for p in blk.ports:
+        assert not any(r[0] <= p.x < r[2] and r[1] <= p.y < r[3] for r in shape), p
+    # the refinery takes water at its first input and crude at its second (the recipe's order; engine-checked)
+    ref = next(e for e in blk.entities if e.recipe == "advanced-oil-processing")
+    ins = [tuple(c["target_tile"]) for c in gd.fluid_connections_full(ref.name, ref.x, ref.y, ref.direction)
+           if c["production_type"] == "input"]
+    water = {(math.floor(e.x), math.floor(e.y)) for e in blk.entities if (e.extra or {}).get("unit") == "water"}
+    assert ins[0] in water
+
+
+@lru_cache(maxsize=None)
+def _blue_base(seed=2002, variant="hub"):
+    """The 2002 hub master grown to blue science (mall, steel, science, oil, oil plant, blue), once per session."""
+    w, gd, mp = setup(seed, variant, OIL_RESEARCH + BLUE_RESEARCH + ROBOT_RESEARCH)
+    X.extend(mp, w, gd, "mall", after=4)
+    for tpl in ("steel", "science"):
+        X.extend(mp, w, gd, tpl)
+    add_crude(w, WELLS_2002)
+    for tpl in ("oil", "oil_plant", "blue"):
+        X.extend(mp, w, gd, tpl)
+    return w, gd, mp
+
+
+@lru_cache(maxsize=None)
+def _robot_base():
+    w, gd, mp = _blue_base()
+    mp = copy.deepcopy(mp)
+    info = X.extend(mp, w, gd, "robots")
+    return w, gd, mp, info
+
+
+def test_robot_mall_off_the_bus_with_crude_from_the_oil_plant():
+    """G11: the robot mall beside the plate bus (iron and copper from bus taps), steel and plastic out of their
+    depots or - the blue stage took the plastic chest's free sides - a tap on the blue stage's plastic feed, crude oil
+    branched off the oil plant's crude pipes to its own refinery, water from an offshore pump of its own. The base
+    validates with it, the master stays monotone, its product chests and machines are the helper's mall sources."""
+    w, gd, mp, info = _robot_base()
+    k = info["stage"]
+    assert info["key"] == "x_robots" and M.slabel(k) == "S11" and "robots" in X.templates_built(mp)
+    assert {f["item"] for f in info["feeds"]} == {"iron-plate", "copper-plate", "steel-plate", "plastic-bar"}
+    new = _stage(mp, k)
+    roles = [(e.extra or {}).get("role") for e in new]
+    assert "robot_crude" in roles and "water_pipe" in roles and sum(1 for e in new if e.name == "offshore-pump") == 1
+    assert sum(1 for e in new if e.name == "oil-refinery") == 1
+    rep = M.validate_stage(mp, gd, w, k)
+    assert rep.ok, rep.summary()
+    assert not M.check_monotone(mp, gd)
+    assert sorted(mp.stages[[s.index for s in mp.stages].index(k)].gate) == ["construction-robotics",
+                                                                             "logistic-robotics"]
+    plan = M.stage_plan(mp, k, w, gd, validation={"ok": True})
+    rows = [r for r in plan.rows() if len(r) > 5 and isinstance(r[5], dict) and r[5].get("mall")]
+    assert {r[5]["mall"] for r in rows} == {"chest", "machine"}
+    assert sum(1 for r in rows if r[5]["mall"] == "chest") == len(B.ROBOT_ITEMS)
+    assert len(plan.stats["mall_chests"]) == len(B.ROBOT_ITEMS)
+    with pytest.raises(X.ExpandError):
+        X.extend(copy.deepcopy(mp), w, gd, "robots")          # once per master
+
+
+def test_robot_mall_needs_the_oil_plant_and_the_steel_depot():
+    w, gd, mp = setup(2002, "hub", OIL_RESEARCH + BLUE_RESEARCH + ROBOT_RESEARCH)
+    with pytest.raises(X.ExpandError, match="no plate bus"):
+        X.extend(mp, w, gd, "robots")
+
+
+def _linked(ports, link):
+    """The roboports form one network: each logistic area overlaps another's (graph connected)."""
+    seen, todo = {0}, [0]
+    while todo:
+        i = todo.pop()
+        for j, q in enumerate(ports):
+            if j not in seen and max(abs(ports[i][0] - q[0]), abs(ports[i][1] - q[1])) <= link:
+                seen.add(j)
+                todo.append(j)
+    return len(seen) == len(ports)
+
+
+def test_roboport_grid_covers_the_base_as_one_network():
+    """The roboport stages: the first next to the hub with two storage chests beside it, then the spots linked to the
+    network that cover the most of the base still outside the construction areas, until all of it is covered (then
+    the template says so). Every stage validates (powered), the master stays monotone, the roboports form ONE network
+    (neighbouring logistic areas overlap)."""
+    w, gd, mp, _info = _robot_base()
+    mp = copy.deepcopy(mp)
+    assert X.roboport_coverage(mp, gd)["uncovered"] > 0 and X.roboport_radii(gd) == (25, 55)
+    stages = []
+    for _ in range(6):
+        try:
+            stages.append(X.extend(mp, w, gd, "roboports"))
+        except X.ExpandError as e:
+            assert "cover the whole base" in str(e)
+            break
+    assert len(stages) >= 1 and stages[0]["key"] == "x_roboports" and len(stages[0]["storage"]) == X.HUB_STORAGE
+    assert all(not s["storage"] for s in stages[1:])
+    first = stages[0]["roboports"][0]
+    for c in stages[0]["storage"]:
+        assert max(abs(c[0] - first[0]), abs(c[1] - first[1])) <= 4
+    hub = mp.hub
+    assert abs(first[0] - hub[0]) + abs(first[1] - hub[1]) <= 2 * X.HUB_R
+    for s in stages:
+        assert len(s["roboports"]) <= X.ROBOPORTS_PER_STAGE
+        assert M.validate_stage(mp, gd, w, s["stage"]).ok
+        assert mp.stages[[t.index for t in mp.stages].index(s["stage"])].gate == ["construction-robotics"]
+    assert not M.check_monotone(mp, gd)
+    ports = X.roboports_of(mp)
+    assert _linked(ports, 2 * X.ROBOPORT_LOGISTIC_R - X.ROBOPORT_LINK)
+    cov = X.roboport_coverage(mp, gd)
+    assert cov["uncovered"] == 0 and cov["n"] == len(ports)
+    # every mall chest (the mall's and the robot mall's) inside the network's logistic area: they become the passive
+    # providers the robots take from; the first roboport stands by the mall
+    assert cov["mall_out"] == 0
+    malls = [e for e in mp.ents if (e.extra or {}).get("role") == "mall_chest"]
+    assert any(max(abs(c.x - first[0]), abs(c.y - first[1])) <= X.ROBOPORT_LOGISTIC_R for c in malls)
+    # no roboport on ore, all on free ground of the master (no overlap: monotone above)
+    for e in mp.ents:
+        if e.name == "roboport":
+            assert not any(w.resource_at(x, y) for x, y in gd.footprint(e.name, e.x, e.y, 0))
+
+
+def test_roboport_coverage_grows_with_the_base():
+    """R12 asks for more roboports while built-area points lie outside every construction area: a block the base adds
+    120 tiles east of the network is such a point (repeatable as the base grows)."""
+    w, gd = load_fixture(1001)
+
+    class _MP:
+        ents = [PE("roboport", 2.0, 2.0, 0), PE("assembling-machine-1", 30.5, 0.5, 0)]
+    cov = X.roboport_coverage(_MP, gd)
+    assert cov["n"] == 1 and cov["points"] >= 2 and cov["uncovered"] == 0
+    _MP.ents = _MP.ents + [PE("assembling-machine-1", 122.5, 4.5, 0)]
+    grown = X.roboport_coverage(_MP, gd)
+    assert grown["points"] == cov["points"] + 1 and grown["uncovered"] == 1   # (its 3x3 is in one 8x8 cell)
+    # (the map's roboports count too: one the player built covers the new block)
+    w2 = copy.copy(w)
+    from factorio_claude.planner.world import MapEntity
+    w2.entities = [MapEntity("roboport", 110.0, 2.0, 0, {}, None)]
+    assert X.roboport_coverage(_MP, gd, w2)["uncovered"] == 0
+
+
+def test_a_mall_chest_the_robots_upgraded_is_still_the_masters():
+    """autopilot_logistic_chests turns mall chests into passive providers on the map: the planner counts such a chest
+    as the master's own (world_without_master), so later stages still validate."""
+    w, gd, mp, info = _robot_base()
+    chest = next(e for e in mp.ents if (e.extra or {}).get("role") == "mall_chest" and e.name == "iron-chest")
+    from factorio_claude.planner.world import MapEntity
+    w2 = copy.copy(w)
+    w2.entities = list(w.entities) + [MapEntity("passive-provider-chest", chest.x, chest.y, 0, {}, None)]
+    w2._chunk_ent = {}
+    kept = M.world_without_master(w2, mp)
+    assert not any(e.name == "passive-provider-chest" for e in kept.entities)

@@ -112,13 +112,23 @@ def test_mall_items_and_goals():
     assert "underground-belt" not in K.mall_items(1)
     assert "underground-belt" in K.mall_items(1, researched=["logistics"])
     ids = [g["id"] for g in K.roadmap()]
-    assert ids == [f"G{i}" for i in range(11)]
+    assert ids == [f"G{i}" for i in range(12)]
     for g in K.roadmap():
-        assert all(n in ids for n in g["needs"]) and g["round"] in (1, 2, 3, 4)
-    # round 3: past red and green the roadmap goes on to oil (and names blue science as the next, unshipped goal)
+        assert all(n in ids for n in g["needs"]) and g["round"] in (1, 2, 3, 4, 5)
+    # round 3: past red and green the roadmap goes on to oil; round 4 ships blue science (its research path: the
+    # 2.1 names - Advanced circuit, not 1.1's Advanced electronics)
     g9 = K.goal("G9")
     assert g9["templates"] == ["oil", "oil_plant"] and g9["round"] == 3 and "plastics" in g9["techs"]
-    assert K.goal("G10")["round"] > 3
+    g10 = K.goal("G10")
+    assert g10["round"] == 4 and g10["template"] == "blue" and g10["needs"] == ["G9"]
+    assert g10["techs"] == ["engine", "advanced-circuit", "sulfur-processing", "chemical-science-pack"]
+    # round 5: the robot network after blue science (Robotics' chain: Battery, Advanced oil processing -> Lubricant ->
+    # Electric engine), done once a roboport has construction robots
+    g11 = K.goal("G11")
+    assert g11["round"] == 5 and g11["template"] == "robots" and g11["needs"] == ["G10"]
+    assert g11["techs"].index("lubricant") < g11["techs"].index("electric-engine") < g11["techs"].index("robotics")
+    assert {"metric": "tech", "tech": "construction-robotics"} in g11["done"]
+    assert any(c["metric"] == "robot_network" for c in g11["done"])
     # the mall comes with the electric drill stage, not after green science
     assert {"metric": "master_stage_started", "min": 4} in K.goal("G2")["ready"]
 
@@ -176,3 +186,24 @@ def test_research_ranking_is_doctrine_first_and_peaceful():
         assert K.is_combat(name), name
     for name in ("logistics", "steel-processing", "automation-2"):
         assert not K.is_combat(name), name
+
+
+def test_defence_research_comes_early_with_enemies():
+    """Defence v2 (RES-5): with enemies around and red science running, Gun turrets and Stone wall come right after
+    the goal's techs; Military follows the doctrine order (Military 2 once green packs flow); never when peaceful."""
+    gd = load_fixture(1001)[1]
+    done = {"steam-power", "electronics", "automation-science-pack", "automation"}
+    red = {"automation-science-pack"}
+    picks = K.research_order(gd, researched=done, packs_made=red, needed=["logistics"], limit=4, peaceful=False,
+                             defend=True)
+    assert picks[:3] == ["logistics", "gun-turret", "stone-wall"]
+    assert not any(K.is_combat(t) for t in K.research_order(gd, researched=done, packs_made=red, limit=20,
+                                                             defend=True))
+    later = done | {"electric-mining-drill", "logistics", "logistic-science-pack", "steel-processing", "fast-inserter",
+                    "gun-turret", "stone-wall"}
+    picks = K.research_order(gd, researched=later, packs_made=red | {"logistic-science-pack"}, limit=4,
+                             peaceful=False, defend=True)
+    assert picks[:3] == ["military", "automation-2", "advanced-material-processing"]
+    assert "military-2" in K.research_order(gd, researched=later | {"military"}, limit=4, peaceful=False,
+                                            packs_made=red | {"logistic-science-pack"})
+    assert K.mall_items(1, researched=["gun-turret"])[-1] == "firearm-magazine"

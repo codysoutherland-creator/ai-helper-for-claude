@@ -85,10 +85,11 @@ class Plan:
             if prime and not manual:      # planner v3: a self-feeding burner the helper primes with `prime` coal
                 extra = dict({"prime": int(prime)}, **({"type": ug} if ug else {}))
             role = ex.get("role")
-            if role in ("mall_chest", "depot", "mall_am", "head_am"):
+            if role in ("mall_chest", "depot", "mall_am", "head_am", "robot_am"):
                 # autopilot mall (planner/expand.py): the mod registers its chests / machines as the helper's mall
-                # sources when they are built, and limits a mall chest's inventory to `bar` slots
-                mx = {"mall": "machine" if role in ("mall_am", "head_am") else "chest"}
+                # sources when they are built, and limits a mall chest's inventory to `bar` slots (round 5: the robot
+                # mall's product machines and chests too)
+                mx = {"mall": "machine" if role in ("mall_am", "head_am", "robot_am") else "chest"}
                 if ex.get("bar"):
                     mx["bar"] = int(ex["bar"])
                 extra = dict(extra, **mx) if isinstance(extra, dict) else dict(mx, **({"type": ug} if ug else {}))
